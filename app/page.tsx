@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   CheckCircle2,
   Lock,
+  VolumeX,
 } from "lucide-react";
 import { RealtimeAudioPlayer, float32ToInt16PCM, arrayBufferToBase64 } from "./utils/audio";
 import { resolveApiKeyAction } from "./actions";
@@ -45,6 +46,13 @@ const LIVE_MODELS = [
   { id: "gemini-3.1-flash-live-preview", name: "gemini-3.1-flash-live" },
 ];
 
+const VAD_PRESETS = [
+  { id: "mobile", name: "Mobile / Speaker Mode (Threshold 55)", threshold: 55, lockoutMs: 450 },
+  { id: "balanced", name: "Balanced (Threshold 42)", threshold: 42, lockoutMs: 300 },
+  { id: "sensitive", name: "Sensitive / Headphones (Threshold 26)", threshold: 26, lockoutMs: 150 },
+  { id: "off", name: "Manual Interrupt Only (VAD Disabled)", threshold: 999, lockoutMs: 0 },
+];
+
 export default function HomePage() {
   const [apiKeyInput, setApiKeyInput] = useState<string>("");
   const [showApiKeyModal, setShowApiKeyModal] = useState<boolean>(false);
@@ -55,6 +63,8 @@ export default function HomePage() {
 
   const [selectedVoice, setSelectedVoice] = useState<string>("Puck");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-native-audio-preview-12-2025");
+  const [selectedVadPreset, setSelectedVadPreset] = useState<string>("mobile");
+
   const [systemInstruction, setSystemInstruction] = useState<string>(
     "You are YAPAI, a concise, highly intelligent real-time voice assistant. Respond naturally."
   );
@@ -78,12 +88,22 @@ export default function HomePage() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
 
-  // Refs for real-time VAD auto-interruption inside Web Audio callbacks
+  // VAD & Echo Suppression Refs
   const isYapaiSpeakingRef = useRef<boolean>(false);
   const isMutedRef = useRef<boolean>(false);
+  const yapaiSpeechStartTimeRef = useRef<number>(0);
+  const vadPresetRef = useRef<any>(VAD_PRESETS[0]);
+
+  useEffect(() => {
+    const preset = VAD_PRESETS.find((p) => p.id === selectedVadPreset) || VAD_PRESETS[0];
+    vadPresetRef.current = preset;
+  }, [selectedVadPreset]);
 
   useEffect(() => {
     isYapaiSpeakingRef.current = isYapaiSpeaking;
+    if (isYapaiSpeaking) {
+      yapaiSpeechStartTimeRef.current = Date.now();
+    }
   }, [isYapaiSpeaking]);
 
   useEffect(() => {
@@ -91,7 +111,7 @@ export default function HomePage() {
   }, [isMuted]);
 
   // Speaker state calculation
-  const isUserSpeaking = connectionStatus === "live" && !isMuted && !isYapaiSpeaking && audioLevel > 14;
+  const isUserSpeaking = connectionStatus === "live" && !isMuted && !isYapaiSpeaking && audioLevel > 16;
 
   const currentTurnState: "idle" | "connecting" | "listening" | "user-speaking" | "yapai-speaking" =
     connectionStatus !== "live"
@@ -99,10 +119,10 @@ export default function HomePage() {
         ? "connecting"
         : "idle"
       : isYapaiSpeaking
-        ? "yapai-speaking"
-        : isUserSpeaking
-          ? "user-speaking"
-          : "listening";
+      ? "yapai-speaking"
+      : isUserSpeaking
+      ? "user-speaking"
+      : "listening";
 
   // 60FPS animation loop that reads Web Audio API AnalyserNode spectrum data
   useEffect(() => {
@@ -244,13 +264,14 @@ export default function HomePage() {
     addDebugLog("info", `Connecting Native WSS v1alpha (${selectedModel})...`);
 
     try {
-      // 1. Microphone stream (16kHz PCM 1-channel)
+      // 1. Microphone stream (16kHz PCM 1-channel with echo cancellation)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 16000,
           channelCount: 1,
           echoCancellation: true,
           noiseSuppression: true,
+          autoGainControl: true,
         },
       });
       mediaStreamRef.current = stream;
@@ -359,7 +380,7 @@ export default function HomePage() {
         cleanupAudio();
       };
 
-      // 4. Send mic audio frames via WSS & perform Instant VAD Interruption
+      // 4. Send mic audio frames via WSS & perform Adaptive VAD Interruption
       workletNode.port.onmessage = (e: MessageEvent) => {
         if (isMutedRef.current) return;
         const inputData: Float32Array = e.data;
@@ -373,9 +394,19 @@ export default function HomePage() {
         const level = Math.min(100, Math.round(rms * 450));
         setAudioLevel(level);
 
-        // INSTANT VAD AUTO INTERRUPT: If YAPAI is speaking and user talks into mic!
-        if (isYapaiSpeakingRef.current && level > 24) {
-          triggerAutoInterruption("User spoken audio detected");
+        const currentPreset = vadPresetRef.current;
+
+        // SMART ADAPTIVE VAD AUTO INTERRUPT WITH ECHO LOCKOUT WINDOW
+        if (
+          currentPreset.id !== "off" &&
+          isYapaiSpeakingRef.current &&
+          level >= currentPreset.threshold
+        ) {
+          const elapsedSinceSpeechStart = Date.now() - yapaiSpeechStartTimeRef.current;
+          // Ignore echo bleed during lockout window right after YAPAI starts speaking
+          if (elapsedSinceSpeechStart > currentPreset.lockoutMs) {
+            triggerAutoInterruption(`Speech level ${level} > threshold ${currentPreset.threshold}`);
+          }
         }
 
         const int16PCM = float32ToInt16PCM(inputData);
@@ -453,7 +484,7 @@ export default function HomePage() {
     if (wsRef.current) {
       try {
         wsRef.current.close();
-      } catch (e) { }
+      } catch (e) {}
       wsRef.current = null;
     }
     if (mediaStreamRef.current) {
@@ -499,11 +530,11 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#F8F9FA] text-[#111827] font-sans antialiased selection:bg-[#E05A47] selection:text-white">
-
+      
       {/* 1. Fully Mobile-Responsive Navbar */}
       <header className="swiss-panel border-b border-[#E5E7EB] px-3 sm:px-6 py-3 sticky top-0 z-30 bg-white/95 backdrop-blur-md">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
-
+          
           {/* Brand & Connection Badge */}
           <div className="flex items-center gap-2 sm:gap-3">
             <span className="font-mono text-xs sm:text-sm font-extrabold tracking-wider text-[#111827] uppercase flex items-center gap-1">
@@ -514,25 +545,42 @@ export default function HomePage() {
 
             <div className="flex items-center gap-1.5 font-mono text-[10px] sm:text-xs text-[#4B5563]">
               <span
-                className={`w-2 h-2 rounded-full transition-all duration-300 ${connectionStatus === "live"
+                className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                  connectionStatus === "live"
                     ? "bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.6)]"
                     : connectionStatus === "connecting"
-                      ? "bg-[#F59E0B] animate-pulse"
-                      : "bg-[#9CA3AF]"
-                  }`}
+                    ? "bg-[#F59E0B] animate-pulse"
+                    : "bg-[#9CA3AF]"
+                }`}
               />
               <span className="font-medium">
                 {connectionStatus === "live"
                   ? `${latencyMs}ms`
                   : connectionStatus === "connecting"
-                    ? "..."
-                    : "Offline"}
+                  ? "..."
+                  : "Offline"}
               </span>
             </div>
           </div>
 
           {/* Desktop Controls */}
           <div className="hidden md:flex items-center gap-2.5">
+            {/* VAD Sensitivity Mode */}
+            <div className="flex items-center bg-[#F3F4F6] border border-[#E5E7EB] rounded-md px-2.5 py-1.5 text-xs font-mono">
+              <Zap className="w-3.5 h-3.5 text-[#E05A47] mr-1.5" />
+              <select
+                value={selectedVadPreset}
+                onChange={(e) => setSelectedVadPreset(e.target.value)}
+                className="bg-transparent text-[#111827] focus:outline-none cursor-pointer font-medium"
+              >
+                {VAD_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Model Selector */}
             <div className="flex items-center bg-[#F3F4F6] border border-[#E5E7EB] rounded-md px-2.5 py-1.5 text-xs font-mono">
               <Cpu className="w-3.5 h-3.5 text-[#6B7280] mr-1.5" />
@@ -567,15 +615,16 @@ export default function HomePage() {
               </select>
             </div>
 
-            {/* API Key Modal Button with Master / Custom Badge */}
+            {/* API Key Modal Button */}
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${isMasterMode
+              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${
+                isMasterMode
                   ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
                   : hasCustomKey
-                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                    : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
-                }`}
+                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                  : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
+              }`}
             >
               {isMasterMode ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-[#C2410C]" />
@@ -584,7 +633,7 @@ export default function HomePage() {
               ) : (
                 <Key className="w-3.5 h-3.5 text-[#6B7280]" />
               )}
-              <span>{isMasterMode ? "Master Mode" : hasCustomKey ? "Key Saved" : "Set API Key"}</span>
+              <span>{isMasterMode ? "Master Mode" : hasCustomKey ? "Key Saved" : "Set Key"}</span>
             </button>
           </div>
 
@@ -592,12 +641,13 @@ export default function HomePage() {
           <div className="flex md:hidden items-center gap-2">
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${isMasterMode
+              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${
+                isMasterMode
                   ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
                   : hasCustomKey
-                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                    : "bg-white text-[#374151] border-[#E5E7EB]"
-                }`}
+                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                  : "bg-white text-[#374151] border-[#E5E7EB]"
+              }`}
               title="API Key"
             >
               {isMasterMode ? <ShieldCheck className="w-4 h-4 text-[#C2410C]" /> : <Key className="w-4 h-4 text-[#6B7280]" />}
@@ -616,6 +666,21 @@ export default function HomePage() {
         {/* Collapsible Mobile Settings Panel */}
         {showMobileSettings && (
           <div className="md:hidden border-t border-[#E5E7EB] mt-3 pt-3 flex flex-col gap-2.5 bg-[#F9FAFB] p-3 rounded-lg border">
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] font-mono text-[#6B7280] font-bold">VAD SENSITIVITY (INTERRUPT):</label>
+              <select
+                value={selectedVadPreset}
+                onChange={(e) => setSelectedVadPreset(e.target.value)}
+                className="w-full bg-white text-[#111827] text-xs font-mono p-2 rounded border border-[#E5E7EB]"
+              >
+                {VAD_PRESETS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-mono text-[#6B7280] font-bold">MODEL:</label>
               <select
@@ -651,26 +716,26 @@ export default function HomePage() {
         )}
       </header>
 
-      {/* 2. Main Workstation Area (Fully Responsive Layout) */}
+      {/* 2. Main Workstation Area */}
       <main className="flex-1 w-full max-w-4xl mx-auto p-3 sm:p-6 lg:p-8 flex flex-col gap-4 sm:gap-6 justify-center">
-
+        
         {/* Workstation Card */}
         <div className="swiss-panel rounded-xl p-4 sm:p-8 lg:p-10 flex flex-col justify-between min-h-[380px] sm:min-h-[460px] relative bg-white shadow-xs">
-
+          
           {/* Status Bar */}
           <div className="flex items-center justify-between border-b border-[#E5E7EB] pb-3 font-mono text-[11px] sm:text-xs">
             <span className="text-[#6B7280] uppercase tracking-wider flex items-center gap-1.5 font-bold">
               <Activity className="w-3.5 h-3.5 text-[#E05A47]" /> YAPAI WORKSTATION
             </span>
             <span className="text-[#9CA3AF] text-[10px] sm:text-xs">
-              {isMasterMode ? "MASTER ACCESS (SERVER KEY)" : hasCustomKey ? "USER API KEY" : "KEY REQUIRED"}
+              VAD: {VAD_PRESETS.find((p) => p.id === selectedVadPreset)?.id.toUpperCase()}
             </span>
           </div>
 
           {/* Center Visualizer & State Title */}
           <div className="my-6 sm:my-10 flex flex-col items-center justify-center text-center">
-
-            {/* Dynamic Soundwave Bar Chart (16 Bars - Mobile Fit width & gap) */}
+            
+            {/* Dynamic Soundwave Bar Chart */}
             <div className="flex items-center justify-center gap-1 sm:gap-2 h-20 sm:h-32 mb-6 sm:mb-8 w-full overflow-hidden px-1">
               {spectrumBars.map((barHeight, i) => {
                 let barColor = "#E5E7EB";
@@ -712,14 +777,14 @@ export default function HomePage() {
             </h2>
             <p className="text-xs sm:text-sm text-[#6B7280] font-mono mt-2 max-w-sm sm:max-w-md px-2 leading-relaxed">
               {connectionStatus === "live"
-                ? "Speak naturally into microphone. Native WebSocket handles bidirectional audio streaming."
+                ? "Speak naturally into microphone. Interruption sensitivity is tailored for your device."
                 : "Press Start Session to begin real-time voice stream."}
             </p>
           </div>
 
-          {/* Mobile-First Controls Panel at Bottom */}
+          {/* Controls Panel at Bottom */}
           <div className="border-t border-[#E5E7EB] pt-4 sm:pt-5 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
-
+            
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
               {connectionStatus !== "live" ? (
                 <button
@@ -735,10 +800,11 @@ export default function HomePage() {
                   {/* Mute Mic Button */}
                   <button
                     onClick={() => setIsMuted(!isMuted)}
-                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${isMuted
+                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${
+                      isMuted
                         ? "bg-[#FEF2F2] text-[#DC2626] border-[#FCA5A5]"
                         : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-[#F9FAFB]"
-                      }`}
+                    }`}
                   >
                     {isMuted ? <MicOff className="w-3.5 h-3.5 text-[#DC2626]" /> : <Mic className="w-3.5 h-3.5 text-[#10B981]" />}
                     <span>{isMuted ? "MUTED" : "MUTE"}</span>
@@ -754,7 +820,7 @@ export default function HomePage() {
                     <span>INTERRUPT</span>
                   </button>
 
-                  {/* End Session Button (Full width on mobile grid) */}
+                  {/* End Session Button */}
                   <button
                     onClick={handleStopLiveSession}
                     className="tactile-btn col-span-2 sm:col-span-1 flex items-center justify-center gap-1.5 bg-[#111827] hover:bg-[#1F2937] text-white px-4 sm:px-5 py-2.5 rounded-lg font-mono text-xs font-semibold cursor-pointer mt-1 sm:mt-0"
@@ -766,11 +832,11 @@ export default function HomePage() {
               )}
             </div>
 
-            {/* Audio Telemetry Specs */}
+            {/* VAD Mode Status */}
             <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-[#6B7280]">
-              <span>Key Mode:</span>
+              <span>VAD Mode:</span>
               <span className="bg-[#F3F4F6] text-[#111827] px-2 py-0.5 rounded border border-[#E5E7EB] font-bold text-[10px]">
-                {isMasterMode ? "Master Passcode Unlocked" : hasCustomKey ? "User API Key" : "Not Set"}
+                {selectedVadPreset.toUpperCase()}
               </span>
             </div>
           </div>
@@ -814,14 +880,15 @@ export default function HomePage() {
                   <div key={log.id} className="flex items-start gap-1.5">
                     <span className="text-[#6B7280] font-mono">{log.timestamp}</span>
                     <span
-                      className={`font-bold ${log.type === "error"
+                      className={`font-bold ${
+                        log.type === "error"
                           ? "text-[#EF4444]"
                           : log.type === "in"
-                            ? "text-[#34D399]"
-                            : log.type === "out"
-                              ? "text-[#60A5FA]"
-                              : "text-[#9CA3AF]"
-                        }`}
+                          ? "text-[#34D399]"
+                          : log.type === "out"
+                          ? "text-[#60A5FA]"
+                          : "text-[#9CA3AF]"
+                      }`}
                     >
                       [{log.type.toUpperCase()}]
                     </span>
@@ -837,10 +904,10 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-[#E5E7EB] py-3 px-4 text-center font-mono text-[10px] sm:text-[11px] text-[#6B7280] bg-white mt-auto">
-        YAPAI Voice Engine • Dual Access Mode (Master Keyword / User API Key)
+        YAPAI Voice Engine • Adaptive VAD Echo Lockout Protection
       </footer>
 
-      {/* API Key / Master Keyword Modal */}
+      {/* API Key Modal */}
       {showApiKeyModal && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white border border-[#E5E7EB] max-w-md w-full rounded-xl p-5 sm:p-6 shadow-xl flex flex-col gap-4">
@@ -876,6 +943,7 @@ export default function HomePage() {
                 <Lock className="w-3.5 h-3.5 text-[#E05A47]" /> Key Resolution Rules:
               </div>
               <p>• <strong>Other Users:</strong> Enter your own Gemini API Key (starts with <code>AIzaSy...</code>). Stored locally in your browser.</p>
+              <p>• <strong>Owner:</strong> Enter your secret Master Passcode (<code>yapai2026</code>) to automatically unlock server ENV key.</p>
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-1">
