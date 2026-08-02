@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   CheckCircle2,
   Lock,
+  BookOpen,
 } from "lucide-react";
 import { RealtimeAudioPlayer, float32ToInt16PCM, arrayBufferToBase64 } from "./utils/audio";
 import { resolveApiKeyAction } from "./actions";
@@ -41,15 +42,57 @@ const VOICES = [
 ];
 
 const LIVE_MODELS = [
-  { id: "gemini-2.5-flash-native-audio-preview-12-2025", name: "gemini-2.5-flash-audio" },
-  { id: "gemini-3.1-flash-live-preview", name: "gemini-3.1-flash-live" },
+  { id: "gemini-2.5-flash-native-audio-preview-12-2025", name: "YAPAI 2.5 Audio" },
+  { id: "gemini-3.1-flash-live-preview", name: "YAPAI 3.1 Live" },
 ];
 
 const VAD_PRESETS = [
+  { id: "exam_mode", name: "Exam / Thinking Mode (2.5s Pause)", threshold: 45, lockoutMs: 2500 },
   { id: "mobile", name: "Mobile / Speaker Mode (Threshold 55)", threshold: 55, lockoutMs: 450 },
   { id: "balanced", name: "Balanced (Threshold 42)", threshold: 42, lockoutMs: 300 },
   { id: "sensitive", name: "Sensitive / Headphones (Threshold 26)", threshold: 26, lockoutMs: 150 },
   { id: "off", name: "Manual Interrupt Only (VAD Disabled)", threshold: 999, lockoutMs: 0 },
+];
+
+const PRACTICE_MODULES = [
+  {
+    id: "casual",
+    name: "Casual Speaking",
+    prompt: "You are YAPAI, a friendly Native English speaker assistant. Have a casual conversation with me to practice my fluency. Always refer to yourself as YAPAI and never as Gemini. Keep your answers relatively short and ask follow-up questions to keep the conversation going."
+  },
+  {
+    id: "ielts_speaking",
+    name: "IELTS Speaking Test",
+    prompt: `You are an official IELTS Speaking Examiner. Conduct a formal IELTS speaking test. 
+1. Start with Part 1 (Introduction & familiar topics).
+2. Move to Part 2 (Give me a topic and wait for my 2-minute response).
+3. Finish with Part 3 (Abstract questions related to Part 2).
+Strict Rule: Do not break character. At the very end of the test, give me a band score prediction (0-9) and detailed feedback on my Fluency, Lexical Resource, Grammatical Range, and Pronunciation.`
+  },
+  {
+    id: "toefl_speaking",
+    name: "TOEFL Speaking Task",
+    prompt: `You are a TOEFL iBT Speaking evaluator. Give me an Independent Speaking Task question (e.g., 'Do you agree or disagree...'). 
+Wait for my response. After I finish speaking, evaluate my response based on Delivery, Language Use, and Topic Development. Give me a score from 1 to 4, and tell me how I can improve.`
+  },
+  {
+    id: "grammar_nazi",
+    name: "Grammar Corrector",
+    prompt: `You are a strict but helpful English grammar tutor. Let's have a conversation about any topic I choose. 
+However, your main job is to listen for grammatical errors, vocabulary mistakes, or unnatural phrasing in my speech. Every time I make a mistake, gently interrupt me, correct the mistake, explain WHY it's wrong, and then ask me to continue.`
+  },
+  {
+    id: "savage_tutor",
+    name: "Savage Indo Tutor (Roast Mode)",
+    prompt: `Lu adalah tutor Bahasa Inggris paling galak, sarkas, kasar, dan tanpa ampun dari Indonesia. 
+Gunakan bahasa tongkrongan / gaul pasar yang sangat kasar, pedas, dan frontal (seperti "b*go", "t*lol", "bl*on", "b*doh", "kurang ajar", "k*ntol", "ng*ntot", "anjir", "b*ngsat", "br*ngsek", "asu", "t*i", "ngomong apaan lu"). Pengguna adalah orang dewasa yang memang minta di-roast dan dibantai mentalnya demi kelancaran Bahasa Inggris.
+
+Setiap kali murid salah grammar, pronunciation aneh, belepotan, atau mikir kelamaan:
+1. Langsung bantai dan cela kebodohannya secara kasar tanpa tedeng aling-aling.
+2. Kasih pembetulan grammar/kosakata yang bener sambil terus maki-maki dan ngetawain kesalahannya.
+3. Paksa dia buat ngulangin kalimat yang bener dengan nada membentak dan menantang.
+Dilarang keras melunak, ramah, atau minta maaf. Semakin kasar dan frontal bentakannya, semakin bagus!`
+  }
 ];
 
 export default function HomePage() {
@@ -63,9 +106,10 @@ export default function HomePage() {
   const [selectedVoice, setSelectedVoice] = useState<string>("Puck");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-native-audio-preview-12-2025");
   const [selectedVadPreset, setSelectedVadPreset] = useState<string>("mobile");
+  const [selectedModule, setSelectedModule] = useState<string>("casual");
 
   const [systemInstruction, setSystemInstruction] = useState<string>(
-    "You are YAPAI, a concise, highly intelligent real-time voice assistant. Respond naturally."
+    PRACTICE_MODULES[0].prompt
   );
 
   const [connectionStatus, setConnectionStatus] = useState<"idle" | "connecting" | "live" | "error">("idle");
@@ -192,6 +236,13 @@ export default function HomePage() {
       setSelectedVadPreset(savedVad);
     }
 
+    const savedModule = localStorage.getItem("YAPAI_MODULE");
+    if (savedModule && PRACTICE_MODULES.some((m) => m.id === savedModule)) {
+      setSelectedModule(savedModule);
+      const mod = PRACTICE_MODULES.find((m) => m.id === savedModule);
+      if (mod) setSystemInstruction(mod.prompt);
+    }
+
     const player = new RealtimeAudioPlayer(24000);
     player.onStateChange = (playing: boolean) => {
       setIsYapaiSpeaking(playing);
@@ -204,6 +255,20 @@ export default function HomePage() {
       cleanupAudio();
     };
   }, []);
+
+  const handleModuleChange = (moduleId: string) => {
+    setSelectedModule(moduleId);
+    localStorage.setItem("YAPAI_MODULE", moduleId);
+    const mod = PRACTICE_MODULES.find((m) => m.id === moduleId);
+    if (mod) {
+      setSystemInstruction(mod.prompt);
+      addDebugLog("info", `Module changed to: ${mod.name}`);
+      if (moduleId === "ielts_speaking" || moduleId === "toefl_speaking") {
+        handleVadChange("exam_mode");
+        addDebugLog("info", "Auto-switched VAD to Exam / Thinking Mode (2.5s pause)");
+      }
+    }
+  };
 
   const handleModelChange = (modelId: string) => {
     setSelectedModel(modelId);
@@ -388,23 +453,23 @@ export default function HomePage() {
             const isModel31 = selectedModel.includes("3.1");
             const realtimeMessage = isModel31
               ? {
-                  realtimeInput: {
-                    audio: {
+                realtimeInput: {
+                  audio: {
+                    mimeType: "audio/pcm;rate=16000",
+                    data: base64PCM,
+                  },
+                },
+              }
+              : {
+                realtimeInput: {
+                  mediaChunks: [
+                    {
                       mimeType: "audio/pcm;rate=16000",
                       data: base64PCM,
                     },
-                  },
-                }
-              : {
-                  realtimeInput: {
-                    mediaChunks: [
-                      {
-                        mimeType: "audio/pcm;rate=16000",
-                        data: base64PCM,
-                      },
-                    ],
-                  },
-                };
+                  ],
+                },
+              };
 
             wsRef.current.send(JSON.stringify(realtimeMessage));
           } catch (sendErr) {
@@ -605,10 +670,10 @@ export default function HomePage() {
             <div className="flex items-center gap-1.5 font-mono text-[10px] sm:text-xs text-[#4B5563]">
               <span
                 className={`w-2 h-2 rounded-full transition-all duration-300 ${connectionStatus === "live"
-                    ? "bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.6)]"
-                    : connectionStatus === "connecting"
-                      ? "bg-[#F59E0B] animate-pulse"
-                      : "bg-[#9CA3AF]"
+                  ? "bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.6)]"
+                  : connectionStatus === "connecting"
+                    ? "bg-[#F59E0B] animate-pulse"
+                    : "bg-[#9CA3AF]"
                   }`}
               />
               <span className="font-medium">
@@ -623,6 +688,23 @@ export default function HomePage() {
 
           {/* Desktop Controls */}
           <div className="hidden md:flex items-center gap-2.5">
+            {/* Practice Module Selector */}
+            <div className="flex items-center bg-[#F3F4F6] border border-[#E5E7EB] rounded-md px-2.5 py-1.5 text-xs font-mono">
+              <BookOpen className="w-3.5 h-3.5 text-[#E05A47] mr-1.5" />
+              <select
+                value={selectedModule}
+                onChange={(e) => handleModuleChange(e.target.value)}
+                disabled={connectionStatus === "live"}
+                className="bg-transparent text-[#111827] focus:outline-none cursor-pointer disabled:opacity-50 font-medium"
+              >
+                {PRACTICE_MODULES.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* VAD Sensitivity Mode */}
             <div className="flex items-center bg-[#F3F4F6] border border-[#E5E7EB] rounded-md px-2.5 py-1.5 text-xs font-mono">
               <Zap className="w-3.5 h-3.5 text-[#E05A47] mr-1.5" />
@@ -677,10 +759,10 @@ export default function HomePage() {
             <button
               onClick={() => setShowApiKeyModal(true)}
               className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${isMasterMode
-                  ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
-                  : hasCustomKey
-                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                    : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
+                ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
+                : hasCustomKey
+                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                  : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
                 }`}
             >
               {isMasterMode ? (
@@ -699,10 +781,10 @@ export default function HomePage() {
             <button
               onClick={() => setShowApiKeyModal(true)}
               className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${isMasterMode
-                  ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
-                  : hasCustomKey
-                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                    : "bg-white text-[#374151] border-[#E5E7EB]"
+                ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
+                : hasCustomKey
+                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                  : "bg-white text-[#374151] border-[#E5E7EB]"
                 }`}
               title="API Key"
             >
@@ -722,6 +804,22 @@ export default function HomePage() {
         {/* Collapsible Mobile Settings Panel */}
         {showMobileSettings && (
           <div className="md:hidden border-t border-[#E5E7EB] mt-3 pt-3 flex flex-col gap-2.5 bg-[#F9FAFB] p-3 rounded-lg border">
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] font-mono text-[#6B7280] font-bold">PRACTICE MODULE:</label>
+              <select
+                value={selectedModule}
+                onChange={(e) => handleModuleChange(e.target.value)}
+                disabled={connectionStatus === "live"}
+                className="w-full bg-white text-[#111827] text-xs font-mono p-2 rounded border border-[#E5E7EB]"
+              >
+                {PRACTICE_MODULES.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-mono text-[#6B7280] font-bold">VAD SENSITIVITY (INTERRUPT):</label>
               <select
@@ -857,8 +955,8 @@ export default function HomePage() {
                   <button
                     onClick={() => setIsMuted(!isMuted)}
                     className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${isMuted
-                        ? "bg-[#FEF2F2] text-[#DC2626] border-[#FCA5A5]"
-                        : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-[#F9FAFB]"
+                      ? "bg-[#FEF2F2] text-[#DC2626] border-[#FCA5A5]"
+                      : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-[#F9FAFB]"
                       }`}
                   >
                     {isMuted ? <MicOff className="w-3.5 h-3.5 text-[#DC2626]" /> : <Mic className="w-3.5 h-3.5 text-[#10B981]" />}
@@ -904,12 +1002,27 @@ export default function HomePage() {
             <span className="flex items-center gap-1.5 font-bold text-[#374151] text-[11px] sm:text-xs">
               <Sliders className="w-3.5 h-3.5 text-[#E05A47]" /> SYSTEM INSTRUCTION (PERSONA)
             </span>
+            <div className="flex items-center gap-2">
+              <span className="bg-[#FFF7ED] text-[#C2410C] border border-[#FFEDD5] px-2 py-0.5 rounded text-[10px] font-bold">
+                {PRACTICE_MODULES.find((m) => m.id === selectedModule)?.name || "Custom"}
+              </span>
+              <button
+                onClick={() => {
+                  const mod = PRACTICE_MODULES.find((m) => m.id === selectedModule);
+                  if (mod) setSystemInstruction(mod.prompt);
+                }}
+                disabled={connectionStatus === "live"}
+                className="text-[10px] text-[#6B7280] hover:text-[#E05A47] underline cursor-pointer disabled:opacity-40"
+              >
+                Reset Prompt
+              </button>
+            </div>
           </div>
           <textarea
             value={systemInstruction}
             onChange={(e) => setSystemInstruction(e.target.value)}
             disabled={connectionStatus === "live"}
-            rows={2}
+            rows={3}
             className="w-full bg-[#F9FAFB] text-[#111827] text-xs p-2.5 sm:p-3 rounded-lg border border-[#E5E7EB] focus:outline-none focus:border-[#E05A47] font-sans resize-none disabled:opacity-60 leading-relaxed"
           />
         </div>
@@ -936,12 +1049,12 @@ export default function HomePage() {
                     <span className="text-[#6B7280] font-mono">{log.timestamp}</span>
                     <span
                       className={`font-bold ${log.type === "error"
-                          ? "text-[#EF4444]"
-                          : log.type === "in"
-                            ? "text-[#34D399]"
-                            : log.type === "out"
-                              ? "text-[#60A5FA]"
-                              : "text-[#9CA3AF]"
+                        ? "text-[#EF4444]"
+                        : log.type === "in"
+                          ? "text-[#34D399]"
+                          : log.type === "out"
+                            ? "text-[#60A5FA]"
+                            : "text-[#9CA3AF]"
                         }`}
                     >
                       [{log.type.toUpperCase()}]
