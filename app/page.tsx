@@ -1019,11 +1019,19 @@ export default function HomePage() {
             </div>
           </div>
           <textarea
-            value={systemInstruction}
-            onChange={(e) => setSystemInstruction(e.target.value)}
-            disabled={connectionStatus === "live"}
+            value={
+              selectedModule === "savage_tutor"
+                ? "🔒 [System Instruction Hidden - Savage Roast Mode Active]"
+                : systemInstruction
+            }
+            onChange={(e) => {
+              if (selectedModule !== "savage_tutor") {
+                setSystemInstruction(e.target.value);
+              }
+            }}
+            disabled={connectionStatus === "live" || selectedModule === "savage_tutor"}
             rows={3}
-            className="w-full bg-[#F9FAFB] text-[#111827] text-xs p-2.5 sm:p-3 rounded-lg border border-[#E5E7EB] focus:outline-none focus:border-[#E05A47] font-sans resize-none disabled:opacity-60 leading-relaxed"
+            className="w-full bg-[#F9FAFB] text-[#111827] text-xs p-2.5 sm:p-3 rounded-lg border border-[#E5E7EB] focus:outline-none focus:border-[#E05A47] font-sans resize-none disabled:opacity-60 leading-relaxed font-mono"
           />
         </div>
 
