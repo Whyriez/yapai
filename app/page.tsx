@@ -18,8 +18,12 @@ import {
   Play,
   Hand,
   SlidersHorizontal,
+  ShieldCheck,
+  CheckCircle2,
+  Lock,
 } from "lucide-react";
 import { RealtimeAudioPlayer, float32ToInt16PCM, arrayBufferToBase64 } from "./utils/audio";
+import { resolveApiKeyAction } from "./actions";
 
 interface DebugLog {
   id: string;
@@ -45,7 +49,9 @@ export default function HomePage() {
   const [apiKeyInput, setApiKeyInput] = useState<string>("");
   const [showApiKeyModal, setShowApiKeyModal] = useState<boolean>(false);
   const [hasCustomKey, setHasCustomKey] = useState<boolean>(false);
+  const [isMasterMode, setIsMasterMode] = useState<boolean>(false);
   const [showMobileSettings, setShowMobileSettings] = useState<boolean>(false);
+  const [keyErrorMsg, setKeyErrorMsg] = useState<string>("");
 
   const [selectedVoice, setSelectedVoice] = useState<string>("Puck");
   const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-native-audio-preview-12-2025");
@@ -93,10 +99,10 @@ export default function HomePage() {
         ? "connecting"
         : "idle"
       : isYapaiSpeaking
-      ? "yapai-speaking"
-      : isUserSpeaking
-      ? "user-speaking"
-      : "listening";
+        ? "yapai-speaking"
+        : isUserSpeaking
+          ? "user-speaking"
+          : "listening";
 
   // 60FPS animation loop that reads Web Audio API AnalyserNode spectrum data
   useEffect(() => {
@@ -144,12 +150,12 @@ export default function HomePage() {
     return () => cancelAnimationFrame(animId);
   }, [connectionStatus, isYapaiSpeaking, isUserSpeaking, audioLevel]);
 
-  // Init audio player with onStateChange listener
+  // Init audio player & load stored key / master mode
   useEffect(() => {
-    const savedKey = localStorage.getItem("YAPAI_API_KEY");
+    const savedKey = localStorage.getItem("YAPAI_API_KEY") || "";
     if (savedKey) {
       setApiKeyInput(savedKey);
-      setHasCustomKey(true);
+      checkKeyStatus(savedKey);
     }
 
     const player = new RealtimeAudioPlayer(24000);
@@ -158,12 +164,28 @@ export default function HomePage() {
     };
     audioPlayerRef.current = player;
 
-    addDebugLog("info", "Pure Native WebSocket Engine Initialized.");
+    addDebugLog("info", "YAPAI Live Voice Engine Initialized.");
 
     return () => {
       cleanupAudio();
     };
   }, []);
+
+  const checkKeyStatus = async (keyOrKeyword: string) => {
+    if (!keyOrKeyword.trim()) {
+      setHasCustomKey(false);
+      setIsMasterMode(false);
+      return;
+    }
+    const res = await resolveApiKeyAction(keyOrKeyword);
+    if (res.success) {
+      setHasCustomKey(true);
+      setIsMasterMode(!!res.isMaster);
+    } else {
+      setHasCustomKey(false);
+      setIsMasterMode(false);
+    }
+  };
 
   const addDebugLog = (type: "info" | "in" | "out" | "error", message: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3 });
@@ -171,10 +193,6 @@ export default function HomePage() {
       { id: Math.random().toString(), timestamp, type, message },
       ...prev.slice(0, 49),
     ]);
-  };
-
-  const getEffectiveApiKey = () => {
-    return apiKeyInput.trim() || process.env.NEXT_PUBLIC_GEMINI_API_KEY || "";
   };
 
   // Immediate Interruption Handler
@@ -190,16 +208,39 @@ export default function HomePage() {
     addDebugLog("out", `Auto-Interrupted YAPAI playback (${reason})`);
   };
 
-  // Start PURE NATIVE WEBSOCKET Session (Zero SDK dependencies)
+  // Start Session with API Key or Master Keyword resolution
   const handleStartLiveSession = async () => {
-    const apiKey = getEffectiveApiKey();
-    if (!apiKey) {
+    setConnectionStatus("connecting");
+
+    const savedInput = apiKeyInput.trim() || localStorage.getItem("YAPAI_API_KEY") || "";
+    if (!savedInput) {
       setShowApiKeyModal(true);
-      addDebugLog("error", "API Key missing. Enter API Key to proceed.");
+      setConnectionStatus("idle");
+      addDebugLog("error", "API Key or Master Keyword missing. Enter to proceed.");
       return;
     }
 
-    setConnectionStatus("connecting");
+    addDebugLog("info", "Resolving API Key / Master Keyword on server...");
+    const res = await resolveApiKeyAction(savedInput);
+
+    if (!res.success || !res.apiKey) {
+      addDebugLog("error", `Key Resolution Failed: ${res.error}`);
+      setKeyErrorMsg(res.error || "Invalid API Key or Master Passcode");
+      setShowApiKeyModal(true);
+      setConnectionStatus("idle");
+      return;
+    }
+
+    const resolvedApiKey = res.apiKey;
+    setIsMasterMode(!!res.isMaster);
+    setHasCustomKey(true);
+
+    if (res.isMaster) {
+      addDebugLog("info", "Master Keyword Accepted! Server GEMINI_API_KEY Unlocked.");
+    } else {
+      addDebugLog("info", "Personal Gemini API Key accepted.");
+    }
+
     addDebugLog("info", `Connecting Native WSS v1alpha (${selectedModel})...`);
 
     try {
@@ -257,7 +298,7 @@ export default function HomePage() {
       workletNode.connect(audioCtx.destination);
 
       // 3. Connect via Direct Native WSS URL (v1alpha BidiGenerateContent)
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${resolvedApiKey}`;
       const startTime = Date.now();
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -365,9 +406,7 @@ export default function HomePage() {
     }
   };
 
-  // Handle server responses with automatic server-side interruption handling
   const handleServerMessage = (serverMessage: any) => {
-    // Check if server flagged turn interruption
     if (serverMessage.serverContent?.interrupted) {
       triggerAutoInterruption("Server VAD Interrupted signal");
       return;
@@ -390,12 +429,10 @@ export default function HomePage() {
     }
   };
 
-  // Manual Interrupt Button
   const handleInterrupt = () => {
     triggerAutoInterruption("Manual Interrupt button pressed");
   };
 
-  // Stop Session
   const handleStopLiveSession = () => {
     if (wsRef.current) {
       try {
@@ -416,7 +453,7 @@ export default function HomePage() {
     if (wsRef.current) {
       try {
         wsRef.current.close();
-      } catch (e) {}
+      } catch (e) { }
       wsRef.current = null;
     }
     if (mediaStreamRef.current) {
@@ -436,48 +473,60 @@ export default function HomePage() {
     }
   };
 
-  const handleSaveApiKey = () => {
-    if (apiKeyInput.trim()) {
-      localStorage.setItem("YAPAI_API_KEY", apiKeyInput.trim());
-      setHasCustomKey(true);
-    } else {
+  const handleSaveApiKey = async () => {
+    setKeyErrorMsg("");
+    const val = apiKeyInput.trim();
+    if (!val) {
       localStorage.removeItem("YAPAI_API_KEY");
       setHasCustomKey(false);
+      setIsMasterMode(false);
+      setShowApiKeyModal(false);
+      return;
     }
+
+    const res = await resolveApiKeyAction(val);
+    if (!res.success) {
+      setKeyErrorMsg(res.error || "Invalid API Key or Passcode.");
+      return;
+    }
+
+    localStorage.setItem("YAPAI_API_KEY", val);
+    setHasCustomKey(true);
+    setIsMasterMode(!!res.isMaster);
     setShowApiKeyModal(false);
+    addDebugLog("info", res.isMaster ? "Master Access Passcode saved." : "Custom Gemini API Key saved to localStorage.");
   };
 
   return (
     <div className="flex flex-col min-h-screen bg-[#F8F9FA] text-[#111827] font-sans antialiased selection:bg-[#E05A47] selection:text-white">
-      
+
       {/* 1. Fully Mobile-Responsive Navbar */}
       <header className="swiss-panel border-b border-[#E5E7EB] px-3 sm:px-6 py-3 sticky top-0 z-30 bg-white/95 backdrop-blur-md">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
-          
+
           {/* Brand & Connection Badge */}
           <div className="flex items-center gap-2 sm:gap-3">
             <span className="font-mono text-xs sm:text-sm font-extrabold tracking-wider text-[#111827] uppercase flex items-center gap-1">
-              YAPAI <span className="text-[#E05A47]">/</span> PURE WSS
+              YAPAI <span className="text-[#E05A47]">/</span> VOICE
             </span>
 
             <div className="h-3.5 w-[1px] bg-[#E5E7EB]" />
 
             <div className="flex items-center gap-1.5 font-mono text-[10px] sm:text-xs text-[#4B5563]">
               <span
-                className={`w-2 h-2 rounded-full transition-all duration-300 ${
-                  connectionStatus === "live"
+                className={`w-2 h-2 rounded-full transition-all duration-300 ${connectionStatus === "live"
                     ? "bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.6)]"
                     : connectionStatus === "connecting"
-                    ? "bg-[#F59E0B] animate-pulse"
-                    : "bg-[#9CA3AF]"
-                }`}
+                      ? "bg-[#F59E0B] animate-pulse"
+                      : "bg-[#9CA3AF]"
+                  }`}
               />
               <span className="font-medium">
                 {connectionStatus === "live"
                   ? `${latencyMs}ms`
                   : connectionStatus === "connecting"
-                  ? "..."
-                  : "Offline"}
+                    ? "..."
+                    : "Offline"}
               </span>
             </div>
           </div>
@@ -518,13 +567,24 @@ export default function HomePage() {
               </select>
             </div>
 
-            {/* API Key Modal Button */}
+            {/* API Key Modal Button with Master / Custom Badge */}
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className="tactile-btn flex items-center gap-1.5 bg-white border border-[#E5E7EB] hover:border-[#D1D5DB] px-3 py-1.5 rounded-md text-xs font-mono font-medium text-[#374151] cursor-pointer"
+              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${isMasterMode
+                  ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
+                  : hasCustomKey
+                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                    : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
+                }`}
             >
-              <Key className="w-3.5 h-3.5 text-[#6B7280]" />
-              <span>{hasCustomKey ? "Key Set" : "API Key"}</span>
+              {isMasterMode ? (
+                <ShieldCheck className="w-3.5 h-3.5 text-[#C2410C]" />
+              ) : hasCustomKey ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-[#047857]" />
+              ) : (
+                <Key className="w-3.5 h-3.5 text-[#6B7280]" />
+              )}
+              <span>{isMasterMode ? "Master Mode" : hasCustomKey ? "Key Saved" : "Set API Key"}</span>
             </button>
           </div>
 
@@ -532,10 +592,15 @@ export default function HomePage() {
           <div className="flex md:hidden items-center gap-2">
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className="tactile-btn flex items-center justify-center p-2 rounded-md border border-[#E5E7EB] bg-white text-[#374151]"
+              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${isMasterMode
+                  ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
+                  : hasCustomKey
+                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                    : "bg-white text-[#374151] border-[#E5E7EB]"
+                }`}
               title="API Key"
             >
-              <Key className="w-4 h-4 text-[#6B7280]" />
+              {isMasterMode ? <ShieldCheck className="w-4 h-4 text-[#C2410C]" /> : <Key className="w-4 h-4 text-[#6B7280]" />}
             </button>
 
             <button
@@ -588,21 +653,23 @@ export default function HomePage() {
 
       {/* 2. Main Workstation Area (Fully Responsive Layout) */}
       <main className="flex-1 w-full max-w-4xl mx-auto p-3 sm:p-6 lg:p-8 flex flex-col gap-4 sm:gap-6 justify-center">
-        
+
         {/* Workstation Card */}
         <div className="swiss-panel rounded-xl p-4 sm:p-8 lg:p-10 flex flex-col justify-between min-h-[380px] sm:min-h-[460px] relative bg-white shadow-xs">
-          
+
           {/* Status Bar */}
           <div className="flex items-center justify-between border-b border-[#E5E7EB] pb-3 font-mono text-[11px] sm:text-xs">
             <span className="text-[#6B7280] uppercase tracking-wider flex items-center gap-1.5 font-bold">
-              <Activity className="w-3.5 h-3.5 text-[#E05A47]" /> PURE NATIVE WSS WORKSTATION
+              <Activity className="w-3.5 h-3.5 text-[#E05A47]" /> YAPAI WORKSTATION
             </span>
-            <span className="text-[#9CA3AF] text-[10px] sm:text-xs">ZERO SDK DEPENDENCIES</span>
+            <span className="text-[#9CA3AF] text-[10px] sm:text-xs">
+              {isMasterMode ? "MASTER ACCESS (SERVER KEY)" : hasCustomKey ? "USER API KEY" : "KEY REQUIRED"}
+            </span>
           </div>
 
           {/* Center Visualizer & State Title */}
           <div className="my-6 sm:my-10 flex flex-col items-center justify-center text-center">
-            
+
             {/* Dynamic Soundwave Bar Chart (16 Bars - Mobile Fit width & gap) */}
             <div className="flex items-center justify-center gap-1 sm:gap-2 h-20 sm:h-32 mb-6 sm:mb-8 w-full overflow-hidden px-1">
               {spectrumBars.map((barHeight, i) => {
@@ -646,13 +713,13 @@ export default function HomePage() {
             <p className="text-xs sm:text-sm text-[#6B7280] font-mono mt-2 max-w-sm sm:max-w-md px-2 leading-relaxed">
               {connectionStatus === "live"
                 ? "Speak naturally into microphone. Native WebSocket handles bidirectional audio streaming."
-                : "Press Start Session to open direct WebSocket connection."}
+                : "Press Start Session to begin real-time voice stream."}
             </p>
           </div>
 
           {/* Mobile-First Controls Panel at Bottom */}
           <div className="border-t border-[#E5E7EB] pt-4 sm:pt-5 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
-            
+
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
               {connectionStatus !== "live" ? (
                 <button
@@ -668,11 +735,10 @@ export default function HomePage() {
                   {/* Mute Mic Button */}
                   <button
                     onClick={() => setIsMuted(!isMuted)}
-                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${
-                      isMuted
+                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${isMuted
                         ? "bg-[#FEF2F2] text-[#DC2626] border-[#FCA5A5]"
                         : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-[#F9FAFB]"
-                    }`}
+                      }`}
                   >
                     {isMuted ? <MicOff className="w-3.5 h-3.5 text-[#DC2626]" /> : <Mic className="w-3.5 h-3.5 text-[#10B981]" />}
                     <span>{isMuted ? "MUTED" : "MUTE"}</span>
@@ -702,9 +768,9 @@ export default function HomePage() {
 
             {/* Audio Telemetry Specs */}
             <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-[#6B7280]">
-              <span>Protocol:</span>
+              <span>Key Mode:</span>
               <span className="bg-[#F3F4F6] text-[#111827] px-2 py-0.5 rounded border border-[#E5E7EB] font-bold text-[10px]">
-                Native WSS v1alpha (PCM)
+                {isMasterMode ? "Master Passcode Unlocked" : hasCustomKey ? "User API Key" : "Not Set"}
               </span>
             </div>
           </div>
@@ -748,15 +814,14 @@ export default function HomePage() {
                   <div key={log.id} className="flex items-start gap-1.5">
                     <span className="text-[#6B7280] font-mono">{log.timestamp}</span>
                     <span
-                      className={`font-bold ${
-                        log.type === "error"
+                      className={`font-bold ${log.type === "error"
                           ? "text-[#EF4444]"
                           : log.type === "in"
-                          ? "text-[#34D399]"
-                          : log.type === "out"
-                          ? "text-[#60A5FA]"
-                          : "text-[#9CA3AF]"
-                      }`}
+                            ? "text-[#34D399]"
+                            : log.type === "out"
+                              ? "text-[#60A5FA]"
+                              : "text-[#9CA3AF]"
+                        }`}
                     >
                       [{log.type.toUpperCase()}]
                     </span>
@@ -772,35 +837,48 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-[#E5E7EB] py-3 px-4 text-center font-mono text-[10px] sm:text-[11px] text-[#6B7280] bg-white mt-auto">
-        YAPAI Voice Engine • Pure Native WSS v1alpha
+        YAPAI Voice Engine • Dual Access Mode (Master Keyword / User API Key)
       </footer>
 
-      {/* API Key Modal */}
+      {/* API Key / Master Keyword Modal */}
       {showApiKeyModal && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white border border-[#E5E7EB] max-w-md w-full rounded-xl p-5 sm:p-6 shadow-xl flex flex-col gap-4">
             <div className="flex items-center gap-3">
-              <div className="p-2 rounded-lg bg-[#F3F4F6] text-[#111827] border border-[#E5E7EB]">
+              <div className="p-2.5 rounded-lg bg-[#FFF7ED] text-[#C2410C] border border-[#FFEDD5]">
                 <Key className="w-5 h-5" />
               </div>
               <div>
-                <h3 className="text-sm font-bold text-[#111827] font-mono">YAPAI API Key</h3>
-                <p className="text-xs text-[#6B7280]">Required for Multimodal WebSocket Live API</p>
+                <h3 className="text-sm font-bold text-[#111827] font-mono">YAPAI Access Key</h3>
+                <p className="text-xs text-[#6B7280]">Enter your Gemini API Key or Master Keyword</p>
               </div>
             </div>
 
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-mono text-[#374151] font-semibold">API Key:</label>
+              <label className="text-xs font-mono text-[#374151] font-semibold">
+                API Key or Master Passcode:
+              </label>
               <input
                 type="password"
                 value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder="AIzaSy..."
+                onChange={(e) => {
+                  setApiKeyInput(e.target.value);
+                  setKeyErrorMsg("");
+                }}
+                placeholder="AIzaSy... or yapai2026"
                 className="w-full bg-[#F9FAFB] text-[#111827] text-xs font-mono p-2.5 rounded-lg border border-[#E5E7EB] focus:outline-none focus:border-[#E05A47]"
               />
+              {keyErrorMsg && <p className="text-[11px] font-mono text-[#EF4444] mt-0.5">{keyErrorMsg}</p>}
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="bg-[#F9FAFB] border border-[#E5E7EB] p-3 rounded-lg flex flex-col gap-1 text-[11px] text-[#4B5563] font-mono leading-relaxed">
+              <div className="flex items-center gap-1.5 font-bold text-[#111827]">
+                <Lock className="w-3.5 h-3.5 text-[#E05A47]" /> Key Resolution Rules:
+              </div>
+              <p>• <strong>Other Users:</strong> Enter your own Gemini API Key (starts with <code>AIzaSy...</code>). Stored locally in your browser.</p>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
               <button
                 onClick={() => setShowApiKeyModal(false)}
                 className="px-4 py-2 rounded-md text-xs font-mono text-[#6B7280] hover:text-[#111827] transition cursor-pointer"
@@ -811,7 +889,7 @@ export default function HomePage() {
                 onClick={handleSaveApiKey}
                 className="tactile-btn px-5 py-2 rounded-md text-xs font-mono font-semibold text-white bg-[#E05A47] hover:bg-[#C94A38] shadow-sm cursor-pointer"
               >
-                Save Key
+                Save &amp; Unlock
               </button>
             </div>
           </div>
