@@ -99,10 +99,10 @@ export default function HomePage() {
         ? "connecting"
         : "idle"
       : isYapaiSpeaking
-      ? "yapai-speaking"
-      : isUserSpeaking
-      ? "user-speaking"
-      : "listening";
+        ? "yapai-speaking"
+        : isUserSpeaking
+          ? "user-speaking"
+          : "listening";
 
   // 60FPS animation loop that reads Web Audio API AnalyserNode spectrum data
   useEffect(() => {
@@ -453,7 +453,7 @@ export default function HomePage() {
     if (wsRef.current) {
       try {
         wsRef.current.close();
-      } catch (e) {}
+      } catch (e) { }
       wsRef.current = null;
     }
     if (mediaStreamRef.current) {
@@ -499,11 +499,11 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#F8F9FA] text-[#111827] font-sans antialiased selection:bg-[#E05A47] selection:text-white">
-      
+
       {/* 1. Fully Mobile-Responsive Navbar */}
       <header className="swiss-panel border-b border-[#E5E7EB] px-3 sm:px-6 py-3 sticky top-0 z-30 bg-white/95 backdrop-blur-md">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
-          
+
           {/* Brand & Connection Badge */}
           <div className="flex items-center gap-2 sm:gap-3">
             <span className="font-mono text-xs sm:text-sm font-extrabold tracking-wider text-[#111827] uppercase flex items-center gap-1">
@@ -514,20 +514,19 @@ export default function HomePage() {
 
             <div className="flex items-center gap-1.5 font-mono text-[10px] sm:text-xs text-[#4B5563]">
               <span
-                className={`w-2 h-2 rounded-full transition-all duration-300 ${
-                  connectionStatus === "live"
+                className={`w-2 h-2 rounded-full transition-all duration-300 ${connectionStatus === "live"
                     ? "bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.6)]"
                     : connectionStatus === "connecting"
-                    ? "bg-[#F59E0B] animate-pulse"
-                    : "bg-[#9CA3AF]"
-                }`}
+                      ? "bg-[#F59E0B] animate-pulse"
+                      : "bg-[#9CA3AF]"
+                  }`}
               />
               <span className="font-medium">
                 {connectionStatus === "live"
                   ? `${latencyMs}ms`
                   : connectionStatus === "connecting"
-                  ? "..."
-                  : "Offline"}
+                    ? "..."
+                    : "Offline"}
               </span>
             </div>
           </div>
@@ -571,13 +570,12 @@ export default function HomePage() {
             {/* API Key Modal Button with Master / Custom Badge */}
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${
-                isMasterMode
+              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${isMasterMode
                   ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
                   : hasCustomKey
-                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                  : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
-              }`}
+                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                    : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
+                }`}
             >
               {isMasterMode ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-[#C2410C]" />
@@ -594,13 +592,12 @@ export default function HomePage() {
           <div className="flex md:hidden items-center gap-2">
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${
-                isMasterMode
+              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${isMasterMode
                   ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
                   : hasCustomKey
-                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                  : "bg-white text-[#374151] border-[#E5E7EB]"
-              }`}
+                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                    : "bg-white text-[#374151] border-[#E5E7EB]"
+                }`}
               title="API Key"
             >
               {isMasterMode ? <ShieldCheck className="w-4 h-4 text-[#C2410C]" /> : <Key className="w-4 h-4 text-[#6B7280]" />}
@@ -656,10 +653,10 @@ export default function HomePage() {
 
       {/* 2. Main Workstation Area (Fully Responsive Layout) */}
       <main className="flex-1 w-full max-w-4xl mx-auto p-3 sm:p-6 lg:p-8 flex flex-col gap-4 sm:gap-6 justify-center">
-        
+
         {/* Workstation Card */}
         <div className="swiss-panel rounded-xl p-4 sm:p-8 lg:p-10 flex flex-col justify-between min-h-[380px] sm:min-h-[460px] relative bg-white shadow-xs">
-          
+
           {/* Status Bar */}
           <div className="flex items-center justify-between border-b border-[#E5E7EB] pb-3 font-mono text-[11px] sm:text-xs">
             <span className="text-[#6B7280] uppercase tracking-wider flex items-center gap-1.5 font-bold">
@@ -672,7 +669,7 @@ export default function HomePage() {
 
           {/* Center Visualizer & State Title */}
           <div className="my-6 sm:my-10 flex flex-col items-center justify-center text-center">
-            
+
             {/* Dynamic Soundwave Bar Chart (16 Bars - Mobile Fit width & gap) */}
             <div className="flex items-center justify-center gap-1 sm:gap-2 h-20 sm:h-32 mb-6 sm:mb-8 w-full overflow-hidden px-1">
               {spectrumBars.map((barHeight, i) => {
@@ -722,7 +719,7 @@ export default function HomePage() {
 
           {/* Mobile-First Controls Panel at Bottom */}
           <div className="border-t border-[#E5E7EB] pt-4 sm:pt-5 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
-            
+
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
               {connectionStatus !== "live" ? (
                 <button
@@ -738,11 +735,10 @@ export default function HomePage() {
                   {/* Mute Mic Button */}
                   <button
                     onClick={() => setIsMuted(!isMuted)}
-                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${
-                      isMuted
+                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${isMuted
                         ? "bg-[#FEF2F2] text-[#DC2626] border-[#FCA5A5]"
                         : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-[#F9FAFB]"
-                    }`}
+                      }`}
                   >
                     {isMuted ? <MicOff className="w-3.5 h-3.5 text-[#DC2626]" /> : <Mic className="w-3.5 h-3.5 text-[#10B981]" />}
                     <span>{isMuted ? "MUTED" : "MUTE"}</span>
@@ -818,15 +814,14 @@ export default function HomePage() {
                   <div key={log.id} className="flex items-start gap-1.5">
                     <span className="text-[#6B7280] font-mono">{log.timestamp}</span>
                     <span
-                      className={`font-bold ${
-                        log.type === "error"
+                      className={`font-bold ${log.type === "error"
                           ? "text-[#EF4444]"
                           : log.type === "in"
-                          ? "text-[#34D399]"
-                          : log.type === "out"
-                          ? "text-[#60A5FA]"
-                          : "text-[#9CA3AF]"
-                      }`}
+                            ? "text-[#34D399]"
+                            : log.type === "out"
+                              ? "text-[#60A5FA]"
+                              : "text-[#9CA3AF]"
+                        }`}
                     >
                       [{log.type.toUpperCase()}]
                     </span>
@@ -881,7 +876,6 @@ export default function HomePage() {
                 <Lock className="w-3.5 h-3.5 text-[#E05A47]" /> Key Resolution Rules:
               </div>
               <p>• <strong>Other Users:</strong> Enter your own Gemini API Key (starts with <code>AIzaSy...</code>). Stored locally in your browser.</p>
-              <p>• <strong>Owner:</strong> Enter your secret Master Passcode (<code>yapai2026</code>) to automatically unlock server ENV key.</p>
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-1">
