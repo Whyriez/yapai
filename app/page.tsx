@@ -21,7 +21,6 @@ import {
   ShieldCheck,
   CheckCircle2,
   Lock,
-  VolumeX,
 } from "lucide-react";
 import { RealtimeAudioPlayer, float32ToInt16PCM, arrayBufferToBase64 } from "./utils/audio";
 import { resolveApiKeyAction } from "./actions";
@@ -76,12 +75,12 @@ export default function HomePage() {
   const [latencyMs, setLatencyMs] = useState<number>(24);
 
   const [debugLogs, setDebugLogs] = useState<DebugLog[]>([]);
-  const [showDebugDrawer, setShowDebugDrawer] = useState<boolean>(false);
+  const [showDebugDrawer, setShowDebugDrawer] = useState<boolean>(true);
 
   // Real-time audio spectrum data array (16 frequency bars)
   const [spectrumBars, setSpectrumBars] = useState<number[]>(new Array(16).fill(8));
 
-  // Native WebSocket & Web Audio Refs
+  // Direct Bidi WebSocket & Web Audio Refs
   const wsRef = useRef<WebSocket | null>(null);
   const audioPlayerRef = useRef<RealtimeAudioPlayer | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -119,10 +118,10 @@ export default function HomePage() {
         ? "connecting"
         : "idle"
       : isYapaiSpeaking
-      ? "yapai-speaking"
-      : isUserSpeaking
-      ? "user-speaking"
-      : "listening";
+        ? "yapai-speaking"
+        : isUserSpeaking
+          ? "user-speaking"
+          : "listening";
 
   // 60FPS animation loop that reads Web Audio API AnalyserNode spectrum data
   useEffect(() => {
@@ -170,12 +169,27 @@ export default function HomePage() {
     return () => cancelAnimationFrame(animId);
   }, [connectionStatus, isYapaiSpeaking, isUserSpeaking, audioLevel]);
 
-  // Init audio player & load stored key / master mode
+  // Load stored preferences (Model, Voice, VAD, API Key) on Mount
   useEffect(() => {
     const savedKey = localStorage.getItem("YAPAI_API_KEY") || "";
     if (savedKey) {
       setApiKeyInput(savedKey);
       checkKeyStatus(savedKey);
+    }
+
+    const savedModel = localStorage.getItem("YAPAI_MODEL");
+    if (savedModel && LIVE_MODELS.some((m) => m.id === savedModel)) {
+      setSelectedModel(savedModel);
+    }
+
+    const savedVoice = localStorage.getItem("YAPAI_VOICE");
+    if (savedVoice && VOICES.some((v) => v.id === savedVoice)) {
+      setSelectedVoice(savedVoice);
+    }
+
+    const savedVad = localStorage.getItem("YAPAI_VAD_PRESET");
+    if (savedVad && VAD_PRESETS.some((p) => p.id === savedVad)) {
+      setSelectedVadPreset(savedVad);
     }
 
     const player = new RealtimeAudioPlayer(24000);
@@ -184,12 +198,30 @@ export default function HomePage() {
     };
     audioPlayerRef.current = player;
 
-    addDebugLog("info", "YAPAI Live Voice Engine Initialized.");
+    addDebugLog("info", "YAPAI Voice Engine Initialized.");
 
     return () => {
       cleanupAudio();
     };
   }, []);
+
+  const handleModelChange = (modelId: string) => {
+    setSelectedModel(modelId);
+    localStorage.setItem("YAPAI_MODEL", modelId);
+    addDebugLog("info", `Model selected: ${modelId} (Saved to localStorage)`);
+  };
+
+  const handleVoiceChange = (voiceId: string) => {
+    setSelectedVoice(voiceId);
+    localStorage.setItem("YAPAI_VOICE", voiceId);
+    addDebugLog("info", `Voice selected: ${voiceId} (Saved to localStorage)`);
+  };
+
+  const handleVadChange = (presetId: string) => {
+    setSelectedVadPreset(presetId);
+    localStorage.setItem("YAPAI_VAD_PRESET", presetId);
+    addDebugLog("info", `VAD sensitivity selected: ${presetId} (Saved to localStorage)`);
+  };
 
   const checkKeyStatus = async (keyOrKeyword: string) => {
     if (!keyOrKeyword.trim()) {
@@ -228,7 +260,7 @@ export default function HomePage() {
     addDebugLog("out", `Auto-Interrupted YAPAI playback (${reason})`);
   };
 
-  // Start Session with API Key or Master Keyword resolution
+  // Start Live Session
   const handleStartLiveSession = async () => {
     setConnectionStatus("connecting");
 
@@ -261,65 +293,128 @@ export default function HomePage() {
       addDebugLog("info", "Personal Gemini API Key accepted.");
     }
 
-    addDebugLog("info", `Connecting Native WSS v1alpha (${selectedModel})...`);
+    const modelName = selectedModel.startsWith("models/") ? selectedModel : `models/${selectedModel}`;
+    addDebugLog("info", `Initiating Bidi WebSocket URL (v1beta) with model: "${modelName}"...`);
 
     try {
-      // 1. Microphone stream (16kHz PCM 1-channel with echo cancellation)
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-      mediaStreamRef.current = stream;
+      // 1. Microphone stream
+      if (!mediaStreamRef.current) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            sampleRate: 16000,
+            channelCount: 1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        mediaStreamRef.current = stream;
+      }
 
-      // 2. AudioContext & AudioWorkletNode (2048 samples = ~128ms)
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioCtx({ sampleRate: 16000 });
-      audioContextRef.current = audioCtx;
+      // 2. AudioContext & AudioWorkletNode
+      if (!audioContextRef.current) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        const audioCtx = new AudioCtx({ sampleRate: 16000 });
+        audioContextRef.current = audioCtx;
 
-      const sourceNode = audioCtx.createMediaStreamSource(stream);
+        const sourceNode = audioCtx.createMediaStreamSource(mediaStreamRef.current);
 
-      const workletCode = `
-        class PCMProcessor extends AudioWorkletProcessor {
-          constructor() {
-            super();
-            this.bufferSize = 2048;
-            this.buffer = new Float32Array(this.bufferSize);
-            this.bufferIndex = 0;
-          }
-          process(inputs, outputs, parameters) {
-            const input = inputs[0];
-            if (input && input.length > 0) {
-              const channelData = input[0];
-              for (let i = 0; i < channelData.length; i++) {
-                this.buffer[this.bufferIndex++] = channelData[i];
-                if (this.bufferIndex >= this.bufferSize) {
-                  this.port.postMessage(new Float32Array(this.buffer));
-                  this.bufferIndex = 0;
+        const workletCode = `
+          class PCMProcessor extends AudioWorkletProcessor {
+            constructor() {
+              super();
+              this.bufferSize = 2048;
+              this.buffer = new Float32Array(this.bufferSize);
+              this.bufferIndex = 0;
+            }
+            process(inputs, outputs, parameters) {
+              const input = inputs[0];
+              if (input && input.length > 0) {
+                const channelData = input[0];
+                for (let i = 0; i < channelData.length; i++) {
+                  this.buffer[this.bufferIndex++] = channelData[i];
+                  if (this.bufferIndex >= this.bufferSize) {
+                    this.port.postMessage(new Float32Array(this.buffer));
+                    this.bufferIndex = 0;
+                  }
                 }
               }
+              return true;
             }
-            return true;
           }
-        }
-        registerProcessor('pcm-processor', PCMProcessor);
-      `;
-      const blob = new Blob([workletCode], { type: "application/javascript" });
-      const workletUrl = URL.createObjectURL(blob);
-      await audioCtx.audioWorklet.addModule(workletUrl);
-      URL.revokeObjectURL(workletUrl);
+          registerProcessor('pcm-processor', PCMProcessor);
+        `;
+        const blob = new Blob([workletCode], { type: "application/javascript" });
+        const workletUrl = URL.createObjectURL(blob);
+        await audioCtx.audioWorklet.addModule(workletUrl);
+        URL.revokeObjectURL(workletUrl);
 
-      const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
-      workletNodeRef.current = workletNode;
-      sourceNode.connect(workletNode);
-      workletNode.connect(audioCtx.destination);
+        const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
+        workletNodeRef.current = workletNode;
+        sourceNode.connect(workletNode);
+        workletNode.connect(audioCtx.destination);
 
-      // 3. Connect via Direct Native WSS URL (v1alpha BidiGenerateContent)
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${resolvedApiKey}`;
+        workletNode.port.onmessage = (e: MessageEvent) => {
+          if (isMutedRef.current) return;
+          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return; // Strict OPEN guard
+
+          const inputData: Float32Array = e.data;
+
+          let sum = 0;
+          for (let i = 0; i < inputData.length; i++) {
+            sum += inputData[i] * inputData[i];
+          }
+          const rms = Math.sqrt(sum / inputData.length);
+          const level = Math.min(100, Math.round(rms * 450));
+          setAudioLevel(level);
+
+          const currentPreset = vadPresetRef.current;
+
+          if (
+            currentPreset.id !== "off" &&
+            isYapaiSpeakingRef.current &&
+            level >= currentPreset.threshold
+          ) {
+            const elapsedSinceSpeechStart = Date.now() - yapaiSpeechStartTimeRef.current;
+            if (elapsedSinceSpeechStart > currentPreset.lockoutMs) {
+              triggerAutoInterruption(`Speech level ${level} > threshold ${currentPreset.threshold}`);
+            }
+          }
+
+          const int16PCM = float32ToInt16PCM(inputData);
+          const base64PCM = arrayBufferToBase64(int16PCM.buffer);
+
+          try {
+            const isModel31 = selectedModel.includes("3.1");
+            const realtimeMessage = isModel31
+              ? {
+                  realtimeInput: {
+                    audio: {
+                      mimeType: "audio/pcm;rate=16000",
+                      data: base64PCM,
+                    },
+                  },
+                }
+              : {
+                  realtimeInput: {
+                    mediaChunks: [
+                      {
+                        mimeType: "audio/pcm;rate=16000",
+                        data: base64PCM,
+                      },
+                    ],
+                  },
+                };
+
+            wsRef.current.send(JSON.stringify(realtimeMessage));
+          } catch (sendErr) {
+            console.warn("Failed sending realtime input over WSS:", sendErr);
+          }
+        };
+      }
+
+      // 3. Connect via Canonical Bidi WebSocket URL (v1beta BidiGenerateContent)
+      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${resolvedApiKey}`;
       const startTime = Date.now();
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
@@ -328,10 +423,8 @@ export default function HomePage() {
         const roundtrip = Date.now() - startTime;
         setLatencyMs(Math.max(18, Math.min(80, roundtrip)));
         setConnectionStatus("live");
-        addDebugLog("info", `Native WSS v1alpha Connected (${roundtrip}ms handshake)`);
+        addDebugLog("info", `WebSocket Connected (v1beta) in ${roundtrip}ms. Sending setup frame...`);
 
-        // Send Initial Setup Payload over WebSocket
-        const modelName = selectedModel.startsWith("models/") ? selectedModel : `models/${selectedModel}`;
         const setupMessage = {
           setup: {
             model: modelName,
@@ -350,7 +443,7 @@ export default function HomePage() {
         };
 
         ws.send(JSON.stringify(setupMessage));
-        addDebugLog("out", "Sent WSS setup handshake payload.");
+        addDebugLog("out", `Sent WSS setup payload for model: "${modelName}".`);
       };
 
       ws.onmessage = async (event: MessageEvent) => {
@@ -361,6 +454,8 @@ export default function HomePage() {
           textData = event.data;
         }
 
+        addDebugLog("in", `Server Frame: ${textData.slice(0, 300)}`);
+
         try {
           const data = JSON.parse(textData);
           handleServerMessage(data);
@@ -370,65 +465,17 @@ export default function HomePage() {
       };
 
       ws.onerror = (err: any) => {
-        addDebugLog("error", "Native WSS Error: Connection failed");
+        addDebugLog("error", "Native WSS Error: Connection failed or rejected by server.");
         setConnectionStatus("error");
       };
 
       ws.onclose = (e: CloseEvent) => {
-        addDebugLog("info", `Native WSS Closed (Code ${e.code}, Reason: ${e.reason || "Normal"})`);
+        addDebugLog(
+          "error",
+          `WSS Disconnected (Code ${e.code}). Reason: "${e.reason || "Server closed connection"}"`
+        );
         setConnectionStatus("idle");
         cleanupAudio();
-      };
-
-      // 4. Send mic audio frames via WSS & perform Adaptive VAD Interruption
-      workletNode.port.onmessage = (e: MessageEvent) => {
-        if (isMutedRef.current) return;
-        const inputData: Float32Array = e.data;
-
-        // Calculate audio RMS level
-        let sum = 0;
-        for (let i = 0; i < inputData.length; i++) {
-          sum += inputData[i] * inputData[i];
-        }
-        const rms = Math.sqrt(sum / inputData.length);
-        const level = Math.min(100, Math.round(rms * 450));
-        setAudioLevel(level);
-
-        const currentPreset = vadPresetRef.current;
-
-        // SMART ADAPTIVE VAD AUTO INTERRUPT WITH ECHO LOCKOUT WINDOW
-        if (
-          currentPreset.id !== "off" &&
-          isYapaiSpeakingRef.current &&
-          level >= currentPreset.threshold
-        ) {
-          const elapsedSinceSpeechStart = Date.now() - yapaiSpeechStartTimeRef.current;
-          // Ignore echo bleed during lockout window right after YAPAI starts speaking
-          if (elapsedSinceSpeechStart > currentPreset.lockoutMs) {
-            triggerAutoInterruption(`Speech level ${level} > threshold ${currentPreset.threshold}`);
-          }
-        }
-
-        const int16PCM = float32ToInt16PCM(inputData);
-        const base64PCM = arrayBufferToBase64(int16PCM.buffer);
-
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          try {
-            const realtimeMessage = {
-              realtimeInput: {
-                mediaChunks: [
-                  {
-                    mimeType: "audio/pcm;rate=16000",
-                    data: base64PCM,
-                  },
-                ],
-              },
-            };
-            wsRef.current.send(JSON.stringify(realtimeMessage));
-          } catch (sendErr) {
-            console.warn("Failed sending realtime input over WSS:", sendErr);
-          }
-        }
       };
     } catch (err: any) {
       addDebugLog("error", `Setup failure: ${err?.message}`);
@@ -438,6 +485,18 @@ export default function HomePage() {
   };
 
   const handleServerMessage = (serverMessage: any) => {
+    if (serverMessage.error) {
+      addDebugLog(
+        "error",
+        `API ERROR (${serverMessage.error.code || "ERR"}): ${serverMessage.error.message || JSON.stringify(serverMessage.error)}`
+      );
+      return;
+    }
+
+    if (serverMessage.setupComplete) {
+      addDebugLog("info", "SETUP OK: Server accepted setup message!");
+    }
+
     if (serverMessage.serverContent?.interrupted) {
       triggerAutoInterruption("Server VAD Interrupted signal");
       return;
@@ -477,14 +536,14 @@ export default function HomePage() {
     setConnectionStatus("idle");
     setIsYapaiSpeaking(false);
     setAudioLevel(0);
-    addDebugLog("info", "Native WSS session ended by user.");
+    addDebugLog("info", "Live session ended by user.");
   };
 
   const cleanupAudio = () => {
     if (wsRef.current) {
       try {
         wsRef.current.close();
-      } catch (e) {}
+      } catch (e) { }
       wsRef.current = null;
     }
     if (mediaStreamRef.current) {
@@ -530,11 +589,11 @@ export default function HomePage() {
 
   return (
     <div className="flex flex-col min-h-screen bg-[#F8F9FA] text-[#111827] font-sans antialiased selection:bg-[#E05A47] selection:text-white">
-      
+
       {/* 1. Fully Mobile-Responsive Navbar */}
       <header className="swiss-panel border-b border-[#E5E7EB] px-3 sm:px-6 py-3 sticky top-0 z-30 bg-white/95 backdrop-blur-md">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
-          
+
           {/* Brand & Connection Badge */}
           <div className="flex items-center gap-2 sm:gap-3">
             <span className="font-mono text-xs sm:text-sm font-extrabold tracking-wider text-[#111827] uppercase flex items-center gap-1">
@@ -545,20 +604,19 @@ export default function HomePage() {
 
             <div className="flex items-center gap-1.5 font-mono text-[10px] sm:text-xs text-[#4B5563]">
               <span
-                className={`w-2 h-2 rounded-full transition-all duration-300 ${
-                  connectionStatus === "live"
+                className={`w-2 h-2 rounded-full transition-all duration-300 ${connectionStatus === "live"
                     ? "bg-[#10B981] shadow-[0_0_8px_rgba(16,185,129,0.6)]"
                     : connectionStatus === "connecting"
-                    ? "bg-[#F59E0B] animate-pulse"
-                    : "bg-[#9CA3AF]"
-                }`}
+                      ? "bg-[#F59E0B] animate-pulse"
+                      : "bg-[#9CA3AF]"
+                  }`}
               />
               <span className="font-medium">
                 {connectionStatus === "live"
                   ? `${latencyMs}ms`
                   : connectionStatus === "connecting"
-                  ? "..."
-                  : "Offline"}
+                    ? "..."
+                    : "Offline"}
               </span>
             </div>
           </div>
@@ -570,7 +628,7 @@ export default function HomePage() {
               <Zap className="w-3.5 h-3.5 text-[#E05A47] mr-1.5" />
               <select
                 value={selectedVadPreset}
-                onChange={(e) => setSelectedVadPreset(e.target.value)}
+                onChange={(e) => handleVadChange(e.target.value)}
                 className="bg-transparent text-[#111827] focus:outline-none cursor-pointer font-medium"
               >
                 {VAD_PRESETS.map((p) => (
@@ -586,7 +644,7 @@ export default function HomePage() {
               <Cpu className="w-3.5 h-3.5 text-[#6B7280] mr-1.5" />
               <select
                 value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
+                onChange={(e) => handleModelChange(e.target.value)}
                 disabled={connectionStatus === "live"}
                 className="bg-transparent text-[#111827] focus:outline-none cursor-pointer disabled:opacity-50 font-medium"
               >
@@ -603,7 +661,7 @@ export default function HomePage() {
               <Volume2 className="w-3.5 h-3.5 text-[#6B7280] mr-1.5" />
               <select
                 value={selectedVoice}
-                onChange={(e) => setSelectedVoice(e.target.value)}
+                onChange={(e) => handleVoiceChange(e.target.value)}
                 disabled={connectionStatus === "live"}
                 className="bg-transparent text-[#111827] focus:outline-none cursor-pointer disabled:opacity-50 font-medium"
               >
@@ -618,13 +676,12 @@ export default function HomePage() {
             {/* API Key Modal Button */}
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${
-                isMasterMode
+              className={`tactile-btn flex items-center gap-1.5 border px-3 py-1.5 rounded-md text-xs font-mono font-medium cursor-pointer ${isMasterMode
                   ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
                   : hasCustomKey
-                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                  : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
-              }`}
+                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                    : "bg-white text-[#374151] border-[#E5E7EB] hover:border-[#D1D5DB]"
+                }`}
             >
               {isMasterMode ? (
                 <ShieldCheck className="w-3.5 h-3.5 text-[#C2410C]" />
@@ -641,13 +698,12 @@ export default function HomePage() {
           <div className="flex md:hidden items-center gap-2">
             <button
               onClick={() => setShowApiKeyModal(true)}
-              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${
-                isMasterMode
+              className={`tactile-btn flex items-center justify-center p-2 rounded-md border ${isMasterMode
                   ? "bg-[#FFF7ED] text-[#C2410C] border-[#FFEDD5]"
                   : hasCustomKey
-                  ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
-                  : "bg-white text-[#374151] border-[#E5E7EB]"
-              }`}
+                    ? "bg-[#ECFDF5] text-[#047857] border-[#A7F3D0]"
+                    : "bg-white text-[#374151] border-[#E5E7EB]"
+                }`}
               title="API Key"
             >
               {isMasterMode ? <ShieldCheck className="w-4 h-4 text-[#C2410C]" /> : <Key className="w-4 h-4 text-[#6B7280]" />}
@@ -670,7 +726,7 @@ export default function HomePage() {
               <label className="text-[10px] font-mono text-[#6B7280] font-bold">VAD SENSITIVITY (INTERRUPT):</label>
               <select
                 value={selectedVadPreset}
-                onChange={(e) => setSelectedVadPreset(e.target.value)}
+                onChange={(e) => handleVadChange(e.target.value)}
                 className="w-full bg-white text-[#111827] text-xs font-mono p-2 rounded border border-[#E5E7EB]"
               >
                 {VAD_PRESETS.map((p) => (
@@ -685,7 +741,7 @@ export default function HomePage() {
               <label className="text-[10px] font-mono text-[#6B7280] font-bold">MODEL:</label>
               <select
                 value={selectedModel}
-                onChange={(e) => setSelectedModel(e.target.value)}
+                onChange={(e) => handleModelChange(e.target.value)}
                 disabled={connectionStatus === "live"}
                 className="w-full bg-white text-[#111827] text-xs font-mono p-2 rounded border border-[#E5E7EB]"
               >
@@ -701,7 +757,7 @@ export default function HomePage() {
               <label className="text-[10px] font-mono text-[#6B7280] font-bold">VOICE:</label>
               <select
                 value={selectedVoice}
-                onChange={(e) => setSelectedVoice(e.target.value)}
+                onChange={(e) => handleVoiceChange(e.target.value)}
                 disabled={connectionStatus === "live"}
                 className="w-full bg-white text-[#111827] text-xs font-mono p-2 rounded border border-[#E5E7EB]"
               >
@@ -718,23 +774,23 @@ export default function HomePage() {
 
       {/* 2. Main Workstation Area */}
       <main className="flex-1 w-full max-w-4xl mx-auto p-3 sm:p-6 lg:p-8 flex flex-col gap-4 sm:gap-6 justify-center">
-        
+
         {/* Workstation Card */}
         <div className="swiss-panel rounded-xl p-4 sm:p-8 lg:p-10 flex flex-col justify-between min-h-[380px] sm:min-h-[460px] relative bg-white shadow-xs">
-          
+
           {/* Status Bar */}
           <div className="flex items-center justify-between border-b border-[#E5E7EB] pb-3 font-mono text-[11px] sm:text-xs">
             <span className="text-[#6B7280] uppercase tracking-wider flex items-center gap-1.5 font-bold">
               <Activity className="w-3.5 h-3.5 text-[#E05A47]" /> YAPAI WORKSTATION
             </span>
-            <span className="text-[#9CA3AF] text-[10px] sm:text-xs">
-              VAD: {VAD_PRESETS.find((p) => p.id === selectedVadPreset)?.id.toUpperCase()}
+            <span className="text-[#9CA3AF] text-[10px] sm:text-xs font-bold">
+              {LIVE_MODELS.find((m) => m.id === selectedModel)?.name}
             </span>
           </div>
 
           {/* Center Visualizer & State Title */}
           <div className="my-6 sm:my-10 flex flex-col items-center justify-center text-center">
-            
+
             {/* Dynamic Soundwave Bar Chart */}
             <div className="flex items-center justify-center gap-1 sm:gap-2 h-20 sm:h-32 mb-6 sm:mb-8 w-full overflow-hidden px-1">
               {spectrumBars.map((barHeight, i) => {
@@ -777,14 +833,14 @@ export default function HomePage() {
             </h2>
             <p className="text-xs sm:text-sm text-[#6B7280] font-mono mt-2 max-w-sm sm:max-w-md px-2 leading-relaxed">
               {connectionStatus === "live"
-                ? "Speak naturally into microphone. Interruption sensitivity is tailored for your device."
+                ? "Speak naturally into microphone. Bidi WebSocket handles bidirectional audio streaming."
                 : "Press Start Session to begin real-time voice stream."}
             </p>
           </div>
 
           {/* Controls Panel at Bottom */}
           <div className="border-t border-[#E5E7EB] pt-4 sm:pt-5 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4">
-            
+
             <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full sm:w-auto">
               {connectionStatus !== "live" ? (
                 <button
@@ -800,11 +856,10 @@ export default function HomePage() {
                   {/* Mute Mic Button */}
                   <button
                     onClick={() => setIsMuted(!isMuted)}
-                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${
-                      isMuted
+                    className={`tactile-btn flex items-center justify-center gap-1.5 px-3 sm:px-5 py-2.5 rounded-lg font-mono text-xs border font-semibold cursor-pointer ${isMuted
                         ? "bg-[#FEF2F2] text-[#DC2626] border-[#FCA5A5]"
                         : "bg-white text-[#374151] border-[#E5E7EB] hover:bg-[#F9FAFB]"
-                    }`}
+                      }`}
                   >
                     {isMuted ? <MicOff className="w-3.5 h-3.5 text-[#DC2626]" /> : <Mic className="w-3.5 h-3.5 text-[#10B981]" />}
                     <span>{isMuted ? "MUTED" : "MUTE"}</span>
@@ -860,19 +915,19 @@ export default function HomePage() {
         </div>
 
         {/* Telemetry Log Drawer */}
-        <div className="swiss-panel rounded-xl flex flex-col bg-white shadow-xs overflow-hidden">
+        <div className="swiss-panel rounded-xl flex flex-col bg-[#111827] shadow-xs overflow-hidden">
           <button
             onClick={() => setShowDebugDrawer(!showDebugDrawer)}
-            className="px-4 py-2.5 border-b border-[#E5E7EB] bg-[#F9FAFB] hover:bg-[#F3F4F6] flex items-center justify-between font-mono text-xs text-[#374151] transition cursor-pointer"
+            className="px-4 py-2.5 border-b border-[#374151] bg-[#1F2937] hover:bg-[#374151] flex items-center justify-between font-mono text-xs text-white transition cursor-pointer"
           >
-            <span className="flex items-center gap-1.5 font-bold text-[11px] sm:text-xs">
-              <Terminal className="w-3.5 h-3.5 text-[#6B7280]" /> TELEMETRY &amp; WEBSOCKET LOGS
+            <span className="flex items-center gap-1.5 font-bold text-[11px] sm:text-xs text-[#E05A47]">
+              <Terminal className="w-3.5 h-3.5" /> LIVE TELEMETRY LOGS
             </span>
-            {showDebugDrawer ? <ChevronUp className="w-4 h-4 text-[#6B7280]" /> : <ChevronDown className="w-4 h-4 text-[#6B7280]" />}
+            {showDebugDrawer ? <ChevronUp className="w-4 h-4 text-[#9CA3AF]" /> : <ChevronDown className="w-4 h-4 text-[#9CA3AF]" />}
           </button>
 
           {showDebugDrawer && (
-            <div className="p-3 sm:p-4 bg-[#111827] text-[#E5E7EB] font-mono text-[10px] sm:text-[11px] h-[150px] overflow-y-auto flex flex-col gap-1">
+            <div className="p-3 sm:p-4 bg-[#111827] text-[#E5E7EB] font-mono text-[10px] sm:text-[11px] h-[180px] overflow-y-auto flex flex-col gap-1">
               {debugLogs.length === 0 ? (
                 <span className="text-[#6B7280]">No telemetry events logged.</span>
               ) : (
@@ -880,15 +935,14 @@ export default function HomePage() {
                   <div key={log.id} className="flex items-start gap-1.5">
                     <span className="text-[#6B7280] font-mono">{log.timestamp}</span>
                     <span
-                      className={`font-bold ${
-                        log.type === "error"
+                      className={`font-bold ${log.type === "error"
                           ? "text-[#EF4444]"
                           : log.type === "in"
-                          ? "text-[#34D399]"
-                          : log.type === "out"
-                          ? "text-[#60A5FA]"
-                          : "text-[#9CA3AF]"
-                      }`}
+                            ? "text-[#34D399]"
+                            : log.type === "out"
+                              ? "text-[#60A5FA]"
+                              : "text-[#9CA3AF]"
+                        }`}
                     >
                       [{log.type.toUpperCase()}]
                     </span>
@@ -904,7 +958,7 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-[#E5E7EB] py-3 px-4 text-center font-mono text-[10px] sm:text-[11px] text-[#6B7280] bg-white mt-auto">
-        YAPAI Voice Engine • Adaptive VAD Echo Lockout Protection
+        YAPAI Voice Engine • Powered by Server Actions &amp; Gemini Live
       </footer>
 
       {/* API Key Modal */}
