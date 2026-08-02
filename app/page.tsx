@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from "react";
-import { GoogleGenAI, Modality } from "@google/genai";
 import {
   Mic,
   MicOff,
@@ -38,8 +37,8 @@ const VOICES = [
 ];
 
 const LIVE_MODELS = [
-  { id: "gemini-3.1-flash-live-preview", name: "gemini-3.1-flash-live" },
   { id: "gemini-2.5-flash-native-audio-preview-12-2025", name: "gemini-2.5-flash-audio" },
+  { id: "gemini-3.1-flash-live-preview", name: "gemini-3.1-flash-live" },
 ];
 
 export default function HomePage() {
@@ -49,7 +48,7 @@ export default function HomePage() {
   const [showMobileSettings, setShowMobileSettings] = useState<boolean>(false);
 
   const [selectedVoice, setSelectedVoice] = useState<string>("Puck");
-  const [selectedModel, setSelectedModel] = useState<string>("gemini-3.1-flash-live-preview");
+  const [selectedModel, setSelectedModel] = useState<string>("gemini-2.5-flash-native-audio-preview-12-2025");
   const [systemInstruction, setSystemInstruction] = useState<string>(
     "You are YAPAI, a concise, highly intelligent real-time voice assistant. Respond naturally."
   );
@@ -66,8 +65,8 @@ export default function HomePage() {
   // Real-time audio spectrum data array (16 frequency bars)
   const [spectrumBars, setSpectrumBars] = useState<number[]>(new Array(16).fill(8));
 
-  // Audio & Session Refs
-  const sessionRef = useRef<any>(null);
+  // Native WebSocket & Web Audio Refs
+  const wsRef = useRef<WebSocket | null>(null);
   const audioPlayerRef = useRef<RealtimeAudioPlayer | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -159,7 +158,7 @@ export default function HomePage() {
     };
     audioPlayerRef.current = player;
 
-    addDebugLog("info", "YAPAI Engine ready for Voice Session.");
+    addDebugLog("info", "Pure Native WebSocket Engine Initialized.");
 
     return () => {
       cleanupAudio();
@@ -191,7 +190,7 @@ export default function HomePage() {
     addDebugLog("out", `Auto-Interrupted YAPAI playback (${reason})`);
   };
 
-  // Start YAPAI Multimodal Live Session
+  // Start PURE NATIVE WEBSOCKET Session (Zero SDK dependencies)
   const handleStartLiveSession = async () => {
     const apiKey = getEffectiveApiKey();
     if (!apiKey) {
@@ -201,9 +200,10 @@ export default function HomePage() {
     }
 
     setConnectionStatus("connecting");
-    addDebugLog("info", `Initiating YAPAI Live WebSocket connection (${selectedModel})...`);
+    addDebugLog("info", `Connecting Native WSS v1alpha (${selectedModel})...`);
 
     try {
+      // 1. Microphone stream (16kHz PCM 1-channel)
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 16000,
@@ -214,6 +214,7 @@ export default function HomePage() {
       });
       mediaStreamRef.current = stream;
 
+      // 2. AudioContext & AudioWorkletNode (2048 samples = ~128ms)
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const audioCtx = new AudioCtx({ sampleRate: 16000 });
       audioContextRef.current = audioCtx;
@@ -255,50 +256,74 @@ export default function HomePage() {
       sourceNode.connect(workletNode);
       workletNode.connect(audioCtx.destination);
 
-      const ai = new GoogleGenAI({ apiKey });
-
+      // 3. Connect via Direct Native WSS URL (v1alpha BidiGenerateContent)
+      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
       const startTime = Date.now();
-      const session = await ai.live.connect({
-        model: selectedModel,
-        config: {
-          responseModalities: [(Modality?.AUDIO || "AUDIO") as any],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: selectedVoice,
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        const roundtrip = Date.now() - startTime;
+        setLatencyMs(Math.max(18, Math.min(80, roundtrip)));
+        setConnectionStatus("live");
+        addDebugLog("info", `Native WSS v1alpha Connected (${roundtrip}ms handshake)`);
+
+        // Send Initial Setup Payload over WebSocket
+        const modelName = selectedModel.startsWith("models/") ? selectedModel : `models/${selectedModel}`;
+        const setupMessage = {
+          setup: {
+            model: modelName,
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: selectedVoice,
+                  },
+                },
               },
             },
+            systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
           },
-          systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-        },
-        callbacks: {
-          onopen: () => {
-            const roundtrip = Date.now() - startTime;
-            setLatencyMs(Math.max(18, Math.min(80, roundtrip)));
-            setConnectionStatus("live");
-            addDebugLog("info", `YAPAI Engine Connected (${roundtrip}ms latency)`);
-          },
-          onmessage: (serverMessage: any) => {
-            handleServerMessage(serverMessage);
-          },
-          onerror: (err: any) => {
-            addDebugLog("error", `YAPAI WS Error: ${err?.message || "Connection error"}`);
-            setConnectionStatus("error");
-          },
-          onclose: (e: any) => {
-            addDebugLog("info", `YAPAI Session Closed (Code ${e?.code || 1000})`);
-            setConnectionStatus("idle");
-            cleanupAudio();
-          },
-        },
-      });
+        };
 
-      sessionRef.current = session;
+        ws.send(JSON.stringify(setupMessage));
+        addDebugLog("out", "Sent WSS setup handshake payload.");
+      };
 
+      ws.onmessage = async (event: MessageEvent) => {
+        let textData = "";
+        if (event.data instanceof Blob) {
+          textData = await event.data.text();
+        } else if (typeof event.data === "string") {
+          textData = event.data;
+        }
+
+        try {
+          const data = JSON.parse(textData);
+          handleServerMessage(data);
+        } catch (err) {
+          console.warn("Failed parsing WS message:", err);
+        }
+      };
+
+      ws.onerror = (err: any) => {
+        addDebugLog("error", "Native WSS Error: Connection failed");
+        setConnectionStatus("error");
+      };
+
+      ws.onclose = (e: CloseEvent) => {
+        addDebugLog("info", `Native WSS Closed (Code ${e.code}, Reason: ${e.reason || "Normal"})`);
+        setConnectionStatus("idle");
+        cleanupAudio();
+      };
+
+      // 4. Send mic audio frames via WSS & perform Instant VAD Interruption
       workletNode.port.onmessage = (e: MessageEvent) => {
         if (isMutedRef.current) return;
         const inputData: Float32Array = e.data;
 
+        // Calculate audio RMS level
         let sum = 0;
         for (let i = 0; i < inputData.length; i++) {
           sum += inputData[i] * inputData[i];
@@ -307,6 +332,7 @@ export default function HomePage() {
         const level = Math.min(100, Math.round(rms * 450));
         setAudioLevel(level);
 
+        // INSTANT VAD AUTO INTERRUPT: If YAPAI is speaking and user talks into mic!
         if (isYapaiSpeakingRef.current && level > 24) {
           triggerAutoInterruption("User spoken audio detected");
         }
@@ -314,16 +340,21 @@ export default function HomePage() {
         const int16PCM = float32ToInt16PCM(inputData);
         const base64PCM = arrayBufferToBase64(int16PCM.buffer);
 
-        if (sessionRef.current) {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           try {
-            sessionRef.current.sendRealtimeInput({
-              audio: {
-                mimeType: "audio/pcm;rate=16000",
-                data: base64PCM,
+            const realtimeMessage = {
+              realtimeInput: {
+                mediaChunks: [
+                  {
+                    mimeType: "audio/pcm;rate=16000",
+                    data: base64PCM,
+                  },
+                ],
               },
-            });
+            };
+            wsRef.current.send(JSON.stringify(realtimeMessage));
           } catch (sendErr) {
-            console.warn("Failed sending realtime input:", sendErr);
+            console.warn("Failed sending realtime input over WSS:", sendErr);
           }
         }
       };
@@ -334,7 +365,9 @@ export default function HomePage() {
     }
   };
 
+  // Handle server responses with automatic server-side interruption handling
   const handleServerMessage = (serverMessage: any) => {
+    // Check if server flagged turn interruption
     if (serverMessage.serverContent?.interrupted) {
       triggerAutoInterruption("Server VAD Interrupted signal");
       return;
@@ -357,27 +390,35 @@ export default function HomePage() {
     }
   };
 
+  // Manual Interrupt Button
   const handleInterrupt = () => {
     triggerAutoInterruption("Manual Interrupt button pressed");
   };
 
+  // Stop Session
   const handleStopLiveSession = () => {
-    if (sessionRef.current) {
+    if (wsRef.current) {
       try {
-        sessionRef.current.close();
+        wsRef.current.close();
       } catch (err) {
-        console.warn("Error closing session:", err);
+        console.warn("Error closing WebSocket:", err);
       }
-      sessionRef.current = null;
+      wsRef.current = null;
     }
     cleanupAudio();
     setConnectionStatus("idle");
     setIsYapaiSpeaking(false);
     setAudioLevel(0);
-    addDebugLog("info", "Session ended by user.");
+    addDebugLog("info", "Native WSS session ended by user.");
   };
 
   const cleanupAudio = () => {
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch (e) {}
+      wsRef.current = null;
+    }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
@@ -416,7 +457,7 @@ export default function HomePage() {
           {/* Brand & Connection Badge */}
           <div className="flex items-center gap-2 sm:gap-3">
             <span className="font-mono text-xs sm:text-sm font-extrabold tracking-wider text-[#111827] uppercase flex items-center gap-1">
-              YAPAI <span className="text-[#E05A47]">/</span> VOICE
+              YAPAI <span className="text-[#E05A47]">/</span> PURE WSS
             </span>
 
             <div className="h-3.5 w-[1px] bg-[#E5E7EB]" />
@@ -554,9 +595,9 @@ export default function HomePage() {
           {/* Status Bar */}
           <div className="flex items-center justify-between border-b border-[#E5E7EB] pb-3 font-mono text-[11px] sm:text-xs">
             <span className="text-[#6B7280] uppercase tracking-wider flex items-center gap-1.5 font-bold">
-              <Activity className="w-3.5 h-3.5 text-[#E05A47]" /> YAPAI WORKSTATION
+              <Activity className="w-3.5 h-3.5 text-[#E05A47]" /> PURE NATIVE WSS WORKSTATION
             </span>
-            <span className="text-[#9CA3AF] text-[10px] sm:text-xs">VAD INTERRUPT AUTO</span>
+            <span className="text-[#9CA3AF] text-[10px] sm:text-xs">ZERO SDK DEPENDENCIES</span>
           </div>
 
           {/* Center Visualizer & State Title */}
@@ -604,8 +645,8 @@ export default function HomePage() {
             </h2>
             <p className="text-xs sm:text-sm text-[#6B7280] font-mono mt-2 max-w-sm sm:max-w-md px-2 leading-relaxed">
               {connectionStatus === "live"
-                ? "Speak naturally into microphone. Interrupt Yapai by speaking at any time."
-                : "Press Start Session to begin real-time voice stream."}
+                ? "Speak naturally into microphone. Native WebSocket handles bidirectional audio streaming."
+                : "Press Start Session to open direct WebSocket connection."}
             </p>
           </div>
 
@@ -661,9 +702,9 @@ export default function HomePage() {
 
             {/* Audio Telemetry Specs */}
             <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-mono text-[#6B7280]">
-              <span>Audio:</span>
+              <span>Protocol:</span>
               <span className="bg-[#F3F4F6] text-[#111827] px-2 py-0.5 rounded border border-[#E5E7EB] font-bold text-[10px]">
-                16kHz mic / 24kHz PCM out
+                Native WSS v1alpha (PCM)
               </span>
             </div>
           </div>
@@ -731,7 +772,7 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-[#E5E7EB] py-3 px-4 text-center font-mono text-[10px] sm:text-[11px] text-[#6B7280] bg-white mt-auto">
-        YAPAI Voice Engine • Bidirectional Real-Time PCM Stream
+        YAPAI Voice Engine • Pure Native WSS v1alpha
       </footer>
 
       {/* API Key Modal */}
