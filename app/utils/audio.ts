@@ -93,7 +93,7 @@ export class RealtimeAudioPlayer {
 
   public getSpectrumData(): Uint8Array {
     if (this.analyserNode && this.freqData) {
-      this.analyserNode.getByteFrequencyData(this.freqData);
+      this.analyserNode.getByteFrequencyData(this.freqData as any);
       return this.freqData;
     }
     return new Uint8Array(0);
