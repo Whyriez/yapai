@@ -130,6 +130,28 @@ export default function HomePage() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const lastKeepAliveTimeRef = useRef<number>(0);
+  const wakeLockRef = useRef<any>(null);
+
+  const requestWakeLock = async () => {
+    try {
+      if (typeof navigator !== "undefined" && "wakeLock" in navigator) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request("screen");
+        addDebugLog("info", "Screen Wake Lock acquired (prevents mobile sleep/disconnection).");
+      }
+    } catch (err) {
+      console.warn("Wake Lock request failed:", err);
+    }
+  };
+
+  const releaseWakeLock = () => {
+    if (wakeLockRef.current) {
+      try {
+        wakeLockRef.current.release();
+      } catch (e) {}
+      wakeLockRef.current = null;
+    }
+  };
 
   // VAD & Echo Suppression Refs
   const isYapaiSpeakingRef = useRef<boolean>(false);
@@ -328,6 +350,9 @@ export default function HomePage() {
   // Start Live Session
   const handleStartLiveSession = async () => {
     setConnectionStatus("connecting");
+    if (audioPlayerRef.current) {
+      audioPlayerRef.current.init();
+    }
 
     const savedInput = apiKeyInput.trim() || localStorage.getItem("YAPAI_API_KEY") || "";
     if (!savedInput) {
@@ -417,7 +442,7 @@ export default function HomePage() {
         const workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
         workletNodeRef.current = workletNode;
         sourceNode.connect(workletNode);
-        workletNode.connect(audioCtx.destination);
+        // Note: workletNode is NOT connected to audioCtx.destination to prevent mic feedback & earpiece VoIP mode on mobile.
 
         workletNode.port.onmessage = (e: MessageEvent) => {
           if (isMutedRef.current) return;
@@ -435,6 +460,7 @@ export default function HomePage() {
 
           const currentPreset = vadPresetRef.current;
 
+          // 1. Check VAD Interruption while YAPAI is speaking
           if (
             currentPreset.id !== "off" &&
             isYapaiSpeakingRef.current &&
@@ -444,6 +470,23 @@ export default function HomePage() {
             if (elapsedSinceSpeechStart > currentPreset.lockoutMs) {
               triggerAutoInterruption(`Speech level ${level} > threshold ${currentPreset.threshold}`);
             }
+          }
+
+          // 2. CRITICAL FIX: Do NOT send mic PCM data to Gemini while YAPAI is speaking.
+          // Sending continuous mic frames while AI speaks floods Gemini Live's session token window, causing WSS disconnection after 2-3 mins.
+          if (isYapaiSpeakingRef.current) {
+            return;
+          }
+
+          // 3. SILENCE GATING: Throttle idle silence frames (level < 3) to max 1 frame per 2 seconds to prevent context token overflow
+          if (level < 3) {
+            const now = Date.now();
+            if (now - lastKeepAliveTimeRef.current < 2000) {
+              return;
+            }
+            lastKeepAliveTimeRef.current = now;
+          } else {
+            lastKeepAliveTimeRef.current = Date.now();
           }
 
           const int16PCM = float32ToInt16PCM(inputData);
@@ -489,6 +532,7 @@ export default function HomePage() {
         setLatencyMs(Math.max(18, Math.min(80, roundtrip)));
         setConnectionStatus("live");
         addDebugLog("info", `WebSocket Connected (v1beta) in ${roundtrip}ms. Sending setup frame...`);
+        requestWakeLock();
 
         const setupMessage = {
           setup: {
@@ -605,6 +649,7 @@ export default function HomePage() {
   };
 
   const cleanupAudio = () => {
+    releaseWakeLock();
     if (wsRef.current) {
       try {
         wsRef.current.close();
@@ -1019,11 +1064,19 @@ export default function HomePage() {
             </div>
           </div>
           <textarea
-            value={systemInstruction}
-            onChange={(e) => setSystemInstruction(e.target.value)}
-            disabled={connectionStatus === "live"}
+            value={
+              selectedModule === "savage_tutor"
+                ? "🔒 [System Instruction Hidden - Savage Roast Mode Active]"
+                : systemInstruction
+            }
+            onChange={(e) => {
+              if (selectedModule !== "savage_tutor") {
+                setSystemInstruction(e.target.value);
+              }
+            }}
+            disabled={connectionStatus === "live" || selectedModule === "savage_tutor"}
             rows={3}
-            className="w-full bg-[#F9FAFB] text-[#111827] text-xs p-2.5 sm:p-3 rounded-lg border border-[#E5E7EB] focus:outline-none focus:border-[#E05A47] font-sans resize-none disabled:opacity-60 leading-relaxed"
+            className="w-full bg-[#F9FAFB] text-[#111827] text-xs p-2.5 sm:p-3 rounded-lg border border-[#E5E7EB] focus:outline-none focus:border-[#E05A47] font-sans resize-none disabled:opacity-60 leading-relaxed font-mono"
           />
         </div>
 
