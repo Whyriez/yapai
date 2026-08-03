@@ -53,10 +53,12 @@ export class RealtimeAudioPlayer {
   private audioCtx: AudioContext | null = null;
   private analyserNode: AnalyserNode | null = null;
   private mediaStreamDest: MediaStreamAudioDestinationNode | null = null;
+  private audioElement: HTMLAudioElement | null = null;
   private freqData: Uint8Array | null = null;
   private nextStartTime: number = 0;
   private activeSourcesCount: number = 0;
   private sampleRate: number;
+  private isAudioElementWorking: boolean = false;
 
   public onStateChange?: (isPlaying: boolean) => void;
 
@@ -72,20 +74,59 @@ export class RealtimeAudioPlayer {
       this.analyserNode = this.audioCtx.createAnalyser();
       this.analyserNode.fftSize = 64;
       this.analyserNode.smoothingTimeConstant = 0.75;
-      this.analyserNode.connect(this.audioCtx.destination);
 
-      try {
-        this.mediaStreamDest = this.audioCtx.createMediaStreamDestination();
-        this.analyserNode.connect(this.mediaStreamDest);
-      } catch (e) {
-        console.warn("MediaStreamDestination not supported:", e);
+      // Route audio output via HTMLAudioElement (<audio playsinline>) to force Main Speaker (loudspeaker) on mobile browsers (iOS Safari & Chrome Android)
+      if (typeof window !== "undefined" && typeof this.audioCtx.createMediaStreamDestination === "function") {
+        try {
+          this.mediaStreamDest = this.audioCtx.createMediaStreamDestination();
+          this.analyserNode.connect(this.mediaStreamDest);
+
+          this.audioElement = new Audio();
+          this.audioElement.autoplay = true;
+          (this.audioElement as any).playsInline = true;
+          this.audioElement.setAttribute("playsinline", "true");
+          this.audioElement.srcObject = this.mediaStreamDest.stream;
+
+          if ("setSinkId" in this.audioElement && typeof (this.audioElement as any).setSinkId === "function") {
+            (this.audioElement as any).setSinkId("").catch(() => {});
+          }
+
+          const playPromise = this.audioElement.play();
+          if (playPromise !== undefined) {
+            playPromise
+              .then(() => {
+                this.isAudioElementWorking = true;
+              })
+              .catch((err) => {
+                console.warn("HTMLAudioElement play fallback to audioCtx.destination:", err);
+                if (!this.isAudioElementWorking && this.analyserNode && this.audioCtx) {
+                  try {
+                    this.analyserNode.connect(this.audioCtx.destination);
+                  } catch (e) {}
+                }
+              });
+          } else {
+            this.isAudioElementWorking = true;
+          }
+        } catch (e) {
+          console.warn("MediaStreamDestination setup error, falling back to audioCtx.destination:", e);
+          this.analyserNode.connect(this.audioCtx.destination);
+        }
+      } else {
+        this.analyserNode.connect(this.audioCtx.destination);
       }
 
       this.freqData = new Uint8Array(this.analyserNode.frequencyBinCount);
     }
+
     if (this.audioCtx.state === "suspended") {
       this.audioCtx.resume();
     }
+
+    if (this.audioElement && this.audioElement.paused) {
+      this.audioElement.play().catch(() => {});
+    }
+
     if (this.nextStartTime === 0) {
       this.nextStartTime = this.audioCtx.currentTime;
     }
@@ -141,6 +182,13 @@ export class RealtimeAudioPlayer {
   }
 
   public stop() {
+    if (this.audioElement) {
+      try {
+        this.audioElement.pause();
+        this.audioElement.srcObject = null;
+      } catch (e) {}
+      this.audioElement = null;
+    }
     if (this.audioCtx && this.audioCtx.state !== "closed") {
       this.audioCtx.close();
       this.audioCtx = null;
@@ -150,6 +198,7 @@ export class RealtimeAudioPlayer {
     }
     this.nextStartTime = 0;
     this.activeSourcesCount = 0;
+    this.isAudioElementWorking = false;
     this.onStateChange?.(false);
   }
 }
