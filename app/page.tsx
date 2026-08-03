@@ -460,7 +460,7 @@ export default function HomePage() {
 
           const currentPreset = vadPresetRef.current;
 
-          // 1. Check VAD Interruption while YAPAI is speaking
+          // Check VAD Interruption while YAPAI is speaking
           if (
             currentPreset.id !== "off" &&
             isYapaiSpeakingRef.current &&
@@ -470,23 +470,6 @@ export default function HomePage() {
             if (elapsedSinceSpeechStart > currentPreset.lockoutMs) {
               triggerAutoInterruption(`Speech level ${level} > threshold ${currentPreset.threshold}`);
             }
-          }
-
-          // 2. CRITICAL FIX: Do NOT send mic PCM data to Gemini while YAPAI is speaking.
-          // Sending continuous mic frames while AI speaks floods Gemini Live's session token window, causing WSS disconnection after 2-3 mins.
-          if (isYapaiSpeakingRef.current) {
-            return;
-          }
-
-          // 3. SILENCE GATING: Throttle idle silence frames (level < 3) to max 1 frame per 2 seconds to prevent context token overflow
-          if (level < 3) {
-            const now = Date.now();
-            if (now - lastKeepAliveTimeRef.current < 2000) {
-              return;
-            }
-            lastKeepAliveTimeRef.current = now;
-          } else {
-            lastKeepAliveTimeRef.current = Date.now();
           }
 
           const int16PCM = float32ToInt16PCM(inputData);
